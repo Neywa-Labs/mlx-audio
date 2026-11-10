@@ -7,8 +7,14 @@ from unittest.mock import MagicMock, patch
 import mlx.core as mx
 import numpy as np
 
+from mlx_audio.tts.continuous import TTSBatchOptions
 from mlx_audio.tts.models.qwen3_tts.config import Qwen3TTSTokenizerDecoderConfig
-from mlx_audio.tts.models.qwen3_tts.qwen3_tts import Model, mel_spectrogram
+from mlx_audio.tts.models.qwen3_tts.continuous_batching import Qwen3TTSBatchSession
+from mlx_audio.tts.models.qwen3_tts.qwen3_tts import (
+    Model,
+    _apply_eos_hold,
+    mel_spectrogram,
+)
 from mlx_audio.tts.models.qwen3_tts.speaker_encoder import (
     TimeDelayNetBlock,
     reflect_pad_1d,
@@ -1268,6 +1274,134 @@ class TestQwen3TTSDecodeValidLength(unittest.TestCase):
                 audio = model._decode_chunk(codes)
 
                 self.assertEqual(audio.shape[0], 4 * 4)
+
+
+def _scripted_eos_sampler(model, eos_at: int, hold_token: int = 5):
+    """Fake first-codebook sampler: the model picks EOS from step `eos_at` on.
+
+    Draws made with EOS masked (the eos_hold_frames path) return `hold_token`.
+    """
+    eos = model.config.talker_config.codec_eos_token_id
+    steps = []
+
+    def sample(logits, **kwargs):
+        if eos in (kwargs.get("suppress_tokens") or []):
+            return mx.array([[hold_token]], dtype=mx.int32)
+        steps.append(len(steps))
+        token = eos if len(steps) > eos_at else 1
+        return mx.array([[token]], dtype=mx.int32)
+
+    return sample
+
+
+class TestQwen3TTSEosHold(unittest.TestCase):
+    """Qwen3-TTS often picks EOS while the last sound is still loud, so the
+    audio stops mid-sound. eos_hold_frames makes it generate a few more frames
+    (EOS masked) after the first EOS pick, then stop.
+    """
+
+    EOS_AT = 3
+
+    def _frames(self, path: str, **kwargs) -> int:
+        model = _make_generation_test_model()
+        model._sample_token = _scripted_eos_sampler(model, eos_at=self.EOS_AT)
+        common = dict(
+            language="English",
+            temperature=0.9,
+            max_tokens=50,
+            top_k=50,
+            top_p=1.0,
+            verbose=False,
+            **kwargs,
+        )
+        if path == "base":
+            results = list(model.generate("hello", **kwargs))
+        elif path == "instruct":
+            results = list(
+                Model._generate_with_instruct(
+                    model,
+                    text="hello",
+                    speaker="vivian",
+                    instruct=None,
+                    repetition_penalty=1.05,
+                    **common,
+                )
+            )
+        else:
+            results = list(
+                Model._generate_icl(
+                    model,
+                    text="hello",
+                    ref_audio=mx.zeros((24000,), dtype=mx.float32),
+                    ref_text="This is the reference transcript.",
+                    repetition_penalty=1.5,
+                    **common,
+                )
+            )
+        return results[-1].token_count
+
+    def test_single_sequence_paths_make_hold_frames_after_eos(self):
+        for path in ("base", "instruct", "icl"):
+            for frames in (0, 1, 2):
+                with self.subTest(path=path, eos_hold_frames=frames):
+                    self.assertEqual(
+                        self._frames(path, eos_hold_frames=frames),
+                        self.EOS_AT + frames,
+                    )
+
+    def test_default_makes_one_extra_frame(self):
+        self.assertEqual(self._frames("base"), self.EOS_AT + 1)
+
+    def test_rows_hold_independently_then_end(self):
+        eos, hold = 9, 5
+        # Row 0 picks EOS at step 1, row 1 at step 0 (then changes its mind,
+        # but it still ends after its hold frame), row 2 never.
+        sampled_steps = [[1, eos, 1], [eos, 1, 1], [eos, 1, 1]]
+        expected_steps = [[1, hold, 1], [hold, eos, 1], [eos, eos, 1]]
+        hold_left = mx.full((3,), -1, dtype=mx.int32)
+        without_eos = mx.full((3, 1), hold, dtype=mx.int32)
+        for sampled, expected in zip(sampled_steps, expected_steps):
+            tokens, hold_left = _apply_eos_hold(
+                mx.array(sampled, dtype=mx.int32)[:, None],
+                without_eos,
+                hold_left,
+                eos_token_id=eos,
+                hold_frames=1,
+            )
+            self.assertEqual(tokens[:, 0].tolist(), expected)
+
+    def test_batch_session_keeps_hold_state_per_request(self):
+        eos, hold = 9, 5
+
+        def sample_batch(logits, suppress_tokens=None, **kwargs):
+            if eos in suppress_tokens:
+                return mx.array([[hold], [hold]], dtype=mx.int32)
+            return mx.array([[eos], [1]], dtype=mx.int32)
+
+        model = SimpleNamespace(
+            speech_tokenizer=object(),
+            config=SimpleNamespace(
+                talker_config=SimpleNamespace(codec_eos_token_id=eos)
+            ),
+            _suppress_codec_tokens=lambda eos_token_id: [0],
+            _sample_token_batch=sample_batch,
+            _predict_code_tokens=lambda first, hidden, **kwargs: ([first], first),
+        )
+        session = Qwen3TTSBatchSession(model, TTSBatchOptions(), eos_hold_frames=1)
+
+        hold_left = [-1, -1]
+        seen = []
+        for _ in range(2):
+            tokens, _, _, left = session._sample_code_tokens(
+                None,
+                None,
+                generated_tokens_per_seq=[[], []],
+                eos_hold_left=hold_left,
+            )
+            seen.append(tokens[:, 0].tolist())
+            hold_left = left.tolist()
+
+        self.assertEqual(seen, [[hold, 1], [eos, 1]])
 
 
 if __name__ == "__main__":

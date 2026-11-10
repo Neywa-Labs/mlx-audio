@@ -61,6 +61,40 @@ def _apply_probability_filters(
     return mx.where(logprobs == -mx.inf, -float("inf"), logits)
 
 
+def _apply_eos_hold(
+    sampled: mx.array,
+    without_eos: mx.array,
+    hold_left: mx.array,
+    eos_token_id: int,
+    hold_frames: int,
+) -> Tuple[mx.array, mx.array]:
+    """Make `hold_frames` more codec frames after a row first picks EOS.
+
+    Qwen3-TTS often picks EOS on a frame where the last sound is still loud,
+    so the decoded audio stops mid-sound. The extra frames are drawn from the
+    same logits with EOS masked; the model fills them with the end of the
+    sound and near-silence. After them the row ends with EOS.
+
+    Args:
+        sampled: [batch, 1] first-codebook tokens drawn as usual.
+        without_eos: [batch, 1] tokens drawn from the same logits, EOS masked.
+        hold_left: [batch] int32 state per row: -1 until the row first picks
+            EOS, then the number of extra frames it still has to make.
+        eos_token_id: Codec EOS token id.
+        hold_frames: Extra frames to make after the first EOS pick.
+
+    Returns:
+        The tokens to use this step ([batch, 1]) and the new hold_left.
+    """
+    picked_eos = sampled[:, 0] == eos_token_id
+    left = mx.where((hold_left < 0) & picked_eos, hold_frames, hold_left)
+    holding = left > 0
+    tokens = mx.where(holding[:, None], without_eos, sampled)
+    eos = mx.array(eos_token_id, dtype=tokens.dtype)
+    tokens = mx.where((left == 0)[:, None], eos, tokens)
+    return tokens, mx.where(holding, left - 1, left)
+
+
 def mel_spectrogram(
     audio: mx.array,
     n_fft: int = 1024,
@@ -1143,10 +1177,11 @@ class Model(nn.Module):
     def create_tts_batch_session(
         self,
         options: TTSBatchOptions,
+        eos_hold_frames: int = 1,
     ):
         from .continuous_batching import Qwen3TTSBatchSession
 
-        return Qwen3TTSBatchSession(self, options)
+        return Qwen3TTSBatchSession(self, options, eos_hold_frames=eos_hold_frames)
 
     def generate(
         self,
@@ -1167,6 +1202,7 @@ class Model(nn.Module):
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
         repetition_penalty: Optional[float] = None,
+        eos_hold_frames: int = 1,
         **kwargs,
     ) -> Generator[GenerationResult, None, None]:
         """Generate audio from text.
@@ -1198,6 +1234,10 @@ class Model(nn.Module):
             top_k: Top-k sampling
             top_p: Top-p (nucleus) sampling
             repetition_penalty: Repetition penalty
+            eos_hold_frames: Codec frames to keep generating after the model first
+                picks EOS. Qwen3-TTS often picks EOS while the last sound is still
+                loud, which cuts the audio mid-sound; one frame (80 ms) lets it end
+                cleanly. 0 stops at the first EOS (the old behaviour).
 
         Yields:
             GenerationResult objects with generated audio
@@ -1236,6 +1276,7 @@ class Model(nn.Module):
                 verbose=verbose,
                 stream=stream,
                 streaming_interval=streaming_interval,
+                eos_hold_frames=eos_hold_frames,
             )
             return
 
@@ -1258,6 +1299,7 @@ class Model(nn.Module):
                 verbose=verbose,
                 stream=stream,
                 streaming_interval=streaming_interval,
+                eos_hold_frames=eos_hold_frames,
             )
             return
 
@@ -1289,6 +1331,7 @@ class Model(nn.Module):
                 verbose=verbose,
                 stream=stream,
                 streaming_interval=streaming_interval,
+                eos_hold_frames=eos_hold_frames,
             )
             return
 
@@ -1353,6 +1396,8 @@ class Model(nn.Module):
                 for i in range(config.vocab_size - 1024, config.vocab_size)
                 if i != eos_token_id
             ]
+            hold_suppress_tokens = suppress_tokens + [eos_token_id]
+            eos_hold_left = mx.full((1,), -1, dtype=mx.int32)
 
             # Initialize streaming state
             if stream:
@@ -1380,6 +1425,25 @@ class Model(nn.Module):
                     ),
                     suppress_tokens=suppress_tokens,
                 )
+                if eos_hold_frames > 0:
+                    without_eos = self._sample_token(
+                        logits,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        repetition_penalty=repetition_penalty,
+                        generated_tokens=(
+                            generated_token_ids if generated_token_ids else None
+                        ),
+                        suppress_tokens=hold_suppress_tokens,
+                    )
+                    next_token, eos_hold_left = _apply_eos_hold(
+                        next_token,
+                        without_eos,
+                        eos_hold_left,
+                        eos_token_id,
+                        eos_hold_frames,
+                    )
 
                 # Lazy EOS check — defer sync to batch with input_embeds eval
                 is_eos = next_token[0, 0] == eos_token_id
@@ -1440,7 +1504,7 @@ class Model(nn.Module):
                 input_embeds = text_embed + codec_embed
 
                 # Single sync point — evaluate input_embeds and EOS check together
-                mx.eval(input_embeds, is_eos)
+                mx.eval(input_embeds, is_eos, eos_hold_left)
 
                 if is_eos.item():
                     break
@@ -1708,6 +1772,7 @@ class Model(nn.Module):
         streaming_interval: float = 2.0,
         streaming_context_size: int = 25,
         verbose: bool = False,
+        eos_hold_frames: int = 1,
     ) -> Generator[BatchGenerationResult, None, None]:
         """Generate audio for multiple texts in a single batched forward pass.
 
@@ -1730,6 +1795,10 @@ class Model(nn.Module):
             stream: Enable streaming output
             streaming_interval: Interval for streaming chunks (seconds)
             verbose: Print verbose output
+            eos_hold_frames: Codec frames to keep generating after the model first
+                picks EOS. Qwen3-TTS often picks EOS while the last sound is still
+                loud, which cuts the audio mid-sound; one frame (80 ms) lets it end
+                cleanly. 0 stops at the first EOS (the old behaviour).
 
         Yields:
             BatchGenerationResult objects with generated audio per sequence
@@ -1801,7 +1870,9 @@ class Model(nn.Module):
                 max_batch_size=batch_size,
                 verbose=verbose,
             )
-            session = self.create_tts_batch_session(options)
+            session = self.create_tts_batch_session(
+                options, eos_hold_frames=eos_hold_frames
+            )
             session.add(
                 [
                     TTSBatchItem(
@@ -1890,6 +1961,8 @@ class Model(nn.Module):
         eos_fill = mx.full((batch_size, 1), eos_token_id, dtype=mx.int32)
 
         suppress_tokens = self._suppress_codec_tokens(eos_token_id)
+        hold_suppress_tokens = suppress_tokens + [eos_token_id]
+        eos_hold_left = mx.full((batch_size,), -1, dtype=mx.int32)
 
         # Streaming state
         streaming_chunk_size = max(1, int(streaming_interval * 12.5))
@@ -1926,6 +1999,23 @@ class Model(nn.Module):
                 generated_tokens_per_seq=generated_token_ids,
                 suppress_tokens=suppress_tokens,
             )  # [batch, 1]
+            if eos_hold_frames > 0:
+                without_eos = self._sample_token_batch(
+                    logits,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    generated_tokens_per_seq=generated_token_ids,
+                    suppress_tokens=hold_suppress_tokens,
+                )
+                sampled_tokens, eos_hold_left = _apply_eos_hold(
+                    sampled_tokens,
+                    without_eos,
+                    eos_hold_left,
+                    eos_token_id,
+                    eos_hold_frames,
+                )
 
             # Mask finished sequences to EOS (vectorized, no sync)
             next_token_batch = mx.where(
@@ -1958,7 +2048,7 @@ class Model(nn.Module):
             trailing_indices = trailing_indices + advance
 
             # SINGLE SYNC per step: eval codes, next input, and finished together
-            mx.eval(all_codes, input_embeds, finished)
+            mx.eval(all_codes, input_embeds, finished, eos_hold_left)
 
             # CPU-side checks on already-eval'd data
             finished_cpu = finished.tolist()
@@ -2123,6 +2213,7 @@ class Model(nn.Module):
         verbose: bool = False,
         stream: bool = False,
         streaming_interval: float = 2.0,
+        eos_hold_frames: int = 1,
     ) -> Generator[GenerationResult, None, None]:
         """Generate speech with the CustomVoice model using a predefined speaker.
 
@@ -2140,6 +2231,10 @@ class Model(nn.Module):
             top_p: Top-p (nucleus) sampling
             repetition_penalty: Repetition penalty
             verbose: Print verbose output
+            eos_hold_frames: Codec frames to keep generating after the model first
+                picks EOS. Qwen3-TTS often picks EOS while the last sound is still
+                loud, which cuts the audio mid-sound; one frame (80 ms) lets it end
+                cleanly. 0 stops at the first EOS (the old behaviour).
 
         Yields:
             GenerationResult objects with generated audio
@@ -2179,6 +2274,7 @@ class Model(nn.Module):
             verbose=verbose,
             stream=stream,
             streaming_interval=streaming_interval,
+            eos_hold_frames=eos_hold_frames,
         )
 
     def generate_voice_design(
@@ -2194,6 +2290,7 @@ class Model(nn.Module):
         verbose: bool = False,
         stream: bool = False,
         streaming_interval: float = 2.0,
+        eos_hold_frames: int = 1,
     ) -> Generator[GenerationResult, None, None]:
         """Generate speech with the VoiceDesign model using natural language voice description.
 
@@ -2210,6 +2307,10 @@ class Model(nn.Module):
             top_p: Top-p (nucleus) sampling
             repetition_penalty: Repetition penalty
             verbose: Print verbose output
+            eos_hold_frames: Codec frames to keep generating after the model first
+                picks EOS. Qwen3-TTS often picks EOS while the last sound is still
+                loud, which cuts the audio mid-sound; one frame (80 ms) lets it end
+                cleanly. 0 stops at the first EOS (the old behaviour).
 
         Yields:
             GenerationResult objects with generated audio
@@ -2238,6 +2339,7 @@ class Model(nn.Module):
             verbose=verbose,
             stream=stream,
             streaming_interval=streaming_interval,
+            eos_hold_frames=eos_hold_frames,
         )
 
     def _generate_icl(
@@ -2255,6 +2357,7 @@ class Model(nn.Module):
         stream: bool = False,
         streaming_interval: float = 2.0,
         streaming_context_size: int = 25,
+        eos_hold_frames: int = 1,
     ) -> Generator[GenerationResult, None, None]:
         """Generate speech using ICL (In-Context Learning) voice cloning.
 
@@ -2293,6 +2396,8 @@ class Model(nn.Module):
             for i in range(config.vocab_size - 1024, config.vocab_size)
             if i != eos_token_id
         ]
+        hold_suppress_tokens = suppress_tokens + [eos_token_id]
+        eos_hold_left = mx.full((1,), -1, dtype=mx.int32)
         trailing_idx = 0
 
         # Create progress bar for token generation
@@ -2333,6 +2438,25 @@ class Model(nn.Module):
                 generated_tokens=(generated_token_ids if generated_token_ids else None),
                 suppress_tokens=suppress_tokens,
             )
+            if eos_hold_frames > 0:
+                without_eos = self._sample_token(
+                    logits,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    generated_tokens=(
+                        generated_token_ids if generated_token_ids else None
+                    ),
+                    suppress_tokens=hold_suppress_tokens,
+                )
+                next_token, eos_hold_left = _apply_eos_hold(
+                    next_token,
+                    without_eos,
+                    eos_hold_left,
+                    eos_token_id,
+                    eos_hold_frames,
+                )
 
             # Lazy EOS check — defer sync to batch with input_embeds eval
             is_eos = next_token[0, 0] == eos_token_id
@@ -2390,7 +2514,7 @@ class Model(nn.Module):
             input_embeds = text_embed + codec_embed
 
             # Single sync point — evaluate input_embeds and EOS check together
-            mx.eval(input_embeds, is_eos)
+            mx.eval(input_embeds, is_eos, eos_hold_left)
 
             if is_eos.item():
                 break
@@ -2575,6 +2699,7 @@ class Model(nn.Module):
         stream: bool = False,
         streaming_interval: float = 2.0,
         streaming_context_size: int = 25,
+        eos_hold_frames: int = 1,
     ) -> Generator[GenerationResult, None, None]:
         """Internal method for generation with instruct support."""
         if self.speech_tokenizer is None:
@@ -2608,6 +2733,8 @@ class Model(nn.Module):
             for i in range(config.vocab_size - 1024, config.vocab_size)
             if i != eos_token_id
         ]
+        hold_suppress_tokens = suppress_tokens + [eos_token_id]
+        eos_hold_left = mx.full((1,), -1, dtype=mx.int32)
         trailing_idx = 0
 
         # Initialize streaming state
@@ -2640,6 +2767,25 @@ class Model(nn.Module):
                 generated_tokens=(generated_token_ids if generated_token_ids else None),
                 suppress_tokens=suppress_tokens,
             )
+            if eos_hold_frames > 0:
+                without_eos = self._sample_token(
+                    logits,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                    generated_tokens=(
+                        generated_token_ids if generated_token_ids else None
+                    ),
+                    suppress_tokens=hold_suppress_tokens,
+                )
+                next_token, eos_hold_left = _apply_eos_hold(
+                    next_token,
+                    without_eos,
+                    eos_hold_left,
+                    eos_token_id,
+                    eos_hold_frames,
+                )
 
             # Lazy EOS check — defer sync to batch with input_embeds eval
             is_eos = next_token[0, 0] == eos_token_id
@@ -2697,7 +2843,7 @@ class Model(nn.Module):
             input_embeds = text_embed + codec_embed
 
             # Single sync point — evaluate input_embeds and EOS check together
-            mx.eval(input_embeds, is_eos)
+            mx.eval(input_embeds, is_eos, eos_hold_left)
 
             if is_eos.item():
                 break
