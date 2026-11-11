@@ -7,12 +7,17 @@ from unittest.mock import MagicMock, patch
 import mlx.core as mx
 import numpy as np
 
+from mlx_audio.tts.models.qwen3_tts.config import Qwen3TTSTokenizerDecoderConfig
 from mlx_audio.tts.models.qwen3_tts.qwen3_tts import Model, mel_spectrogram
 from mlx_audio.tts.models.qwen3_tts.speaker_encoder import (
     TimeDelayNetBlock,
     reflect_pad_1d,
 )
-from mlx_audio.tts.models.qwen3_tts.speech_tokenizer import DecoderBlockUpsample
+from mlx_audio.tts.models.qwen3_tts.speech_tokenizer import (
+    DecoderBlockUpsample,
+    DecoderTransformer,
+    Qwen3TTSSpeechTokenizer,
+)
 
 
 def _top_p_keep_mask(scores, top_p):
@@ -1141,6 +1146,50 @@ class TestDecoderBlockUpsampleStreaming(unittest.TestCase):
                 )
 
 
+class TestDecoderTransformerSlidingWindow(unittest.TestCase):
+    """The decoder transformer attends to at most sliding_window frames."""
+
+    def setUp(self):
+        mx.random.seed(0)
+        self.config = Qwen3TTSTokenizerDecoderConfig(
+            latent_dim=8,
+            hidden_size=16,
+            intermediate_size=32,
+            head_dim=4,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            num_hidden_layers=2,
+            layer_scale_initial_scale=1.0,
+        )
+        self.model = DecoderTransformer(self.config)
+        self.x = mx.random.normal((1, 100, self.config.latent_dim))
+
+    def _windowed_reference(self):
+        q = np.arange(self.x.shape[1])[:, None]
+        k = np.arange(self.x.shape[1])[None, :]
+        allowed = (k <= q) & (k > q - self.config.sliding_window)
+        mask = mx.array(np.where(allowed, 0.0, -np.inf).astype(np.float32))
+        return np.array(self.model(self.x, mask=mask))
+
+    def test_full_forward_uses_sliding_window(self):
+        np.testing.assert_allclose(
+            np.array(self.model(self.x)), self._windowed_reference(), atol=1e-5
+        )
+
+    def test_streaming_matches_windowed_forward(self):
+        cache = self.model.make_cache()
+        out, start = [], 0
+        for size in (25, 1, 1, 10, 25, 1, 30, 1, 6):
+            out.append(self.model(self.x[:, start : start + size], cache=cache))
+            start += size
+        self.assertEqual(start, self.x.shape[1])
+        np.testing.assert_allclose(
+            np.array(mx.concatenate(out, axis=1)),
+            self._windowed_reference(),
+            atol=5e-3,
+        )
+
+
 class _RecordingStreamingDecoder:
     """Records every streaming_step input; returns fixed-rate fake audio."""
 
@@ -1248,6 +1297,84 @@ class TestQwen3TTSICLStreamingPriming(unittest.TestCase):
 
         self.assertEqual(len(decoder.step_inputs), 3)
         self.assertEqual(decoder.step_inputs[0].shape, (1, 1, 1))
+
+
+class _FrameDecoder:
+    """Decode every frame to `upsample` samples and record the codes received."""
+
+    def __init__(self, upsample: int):
+        self.upsample = upsample
+        self.inputs = []
+
+    def chunked_decode(self, codes):
+        self.inputs.append(np.array(codes))
+        return mx.ones(
+            (codes.shape[0], 1, codes.shape[2] * self.upsample), dtype=mx.float32
+        )
+
+
+class _FrameStreamingTokenizer:
+    def __init__(self, upsample: int):
+        self.decode_upsample_rate = upsample
+
+    def streaming_decode(self, codes, chunk_tokens=300):
+        yield mx.ones((1, codes.shape[1] * self.decode_upsample_rate), dtype=mx.float32)
+
+
+def _make_frame_tokenizer(upsample: int = 4):
+    tokenizer = Qwen3TTSSpeechTokenizer.__new__(Qwen3TTSSpeechTokenizer)
+    tokenizer.decoder = _FrameDecoder(upsample)
+    tokenizer.decode_upsample_rate = upsample
+    return tokenizer
+
+
+class TestQwen3TTSDecodeValidLength(unittest.TestCase):
+    """Codebook id 0 is a real code; only -1 marks right padding.
+
+    The reference tokenizer counts frames above -1 and clamps the padding before
+    decoding. Counting only ids above 0 drops one frame of audio from the end for
+    every frame whose first id is 0, anywhere in the sequence. ICL decodes the
+    reference codes with the generated ones, so such frames in a reference cut
+    the end of every take generated with it.
+    """
+
+    def test_frames_with_first_id_zero_are_kept(self):
+        tokenizer = _make_frame_tokenizer()
+        for dtype in (mx.int32, mx.uint32):
+            with self.subTest(dtype=dtype):
+                codes = mx.array(
+                    [[[3, 1], [0, 5], [7, 2], [0, 0], [2, 4]]], dtype=dtype
+                )
+
+                _, lengths = tokenizer.decode(codes)
+
+                self.assertEqual(int(lengths[0]), 5 * 4)
+
+    def test_negative_right_padding_is_excluded_and_clamped(self):
+        tokenizer = _make_frame_tokenizer()
+        codes = mx.array(
+            [
+                [[3, 1], [0, 5], [7, 2]],
+                [[0, 2], [-1, -1], [-1, -1]],
+            ],
+            dtype=mx.int32,
+        )
+
+        _, lengths = tokenizer.decode(codes)
+
+        self.assertEqual([int(n) for n in lengths], [3 * 4, 1 * 4])
+        self.assertGreaterEqual(int(tokenizer.decoder.inputs[0].min()), 0)
+
+    def test_decode_chunk_keeps_frames_with_first_id_zero(self):
+        model = Model.__new__(Model)
+        model.speech_tokenizer = _FrameStreamingTokenizer(upsample=4)
+        for dtype in (mx.int32, mx.uint32):
+            with self.subTest(dtype=dtype):
+                codes = mx.array([[[3, 1], [0, 5], [7, 2], [0, 0]]], dtype=dtype)
+
+                audio = model._decode_chunk(codes)
+
+                self.assertEqual(audio.shape[0], 4 * 4)
 
 
 if __name__ == "__main__":

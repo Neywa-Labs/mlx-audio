@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from typing import (
     List,
+    Literal,
     Optional,
     Tuple,
     Type,
@@ -213,19 +214,25 @@ def apply_quantization(
     weights: dict,
     model_quant_predicate: Optional[callable] = None,
 ) -> None:
-    """Apply quantization to a model if specified in config.
+    """Reconstruct a checkpoint's quantized layers if specified in config.
+
+    Models may define ``model_load_quant_predicate`` to override their
+    conversion predicate when restoring an existing checkpoint.
 
     Args:
         model: The model to quantize
         config: Model config dict (should contain 'quantization' key if quantized)
         weights: Loaded weights dict (used to check which layers have scales)
-        model_quant_predicate: Optional model-specific predicate for which layers to quantize
+        model_quant_predicate: Fallback predicate for models without a load-specific hook
     """
     quantization = config.get("quantization", None)
     if quantization is None:
         quantization = config.get("quantization_config", None)
     if quantization is None:
         return
+    model_quant_predicate = getattr(
+        model, "model_load_quant_predicate", model_quant_predicate
+    )
     group_size = quantization.get("group_size", 64)
 
     def get_class_predicate(p, m):
@@ -657,6 +664,7 @@ def load_audio(
     volume_normalize: bool = False,
     segment_duration: Optional[int] = None,
     duration: Optional[float] = None,
+    resampling_method: Literal["default", "sinc_interp_hann"] = "default",
 ) -> mx.array:
     """Load audio from file path or return mx.array as-is.
 
@@ -669,6 +677,11 @@ def load_audio(
         volume_normalize: Whether to normalize audio volume
         segment_duration: If specified, randomly select a segment of this duration (seconds)
         duration: If specified, only read this many seconds from the start of the file
+        resampling_method: "default" resamples while decoding: with the
+            kaiser_best FIR for WAV, MP3, FLAC and Vorbis, and with ffmpeg for other
+            formats. "sinc_interp_hann" reproduces torchaudio's default resampling
+            of the float channel mean, for models whose reference pipeline uses it.
+            It reads the whole file and does not take ``duration``.
 
     Returns:
         mx.array: Audio waveform at target sample rate
@@ -692,13 +705,23 @@ def load_audio(
     if not os.path.exists(audio):
         raise FileNotFoundError(f"Audio file not found: {audio}")
 
-    samples, _ = audio_read(
-        audio,
-        dtype="float32",
-        sample_rate=sample_rate,
-        nchannels=1,
-        duration=duration,
-    )
+    if resampling_method == "sinc_interp_hann":
+        # The filter needs input past the cut.
+        if duration is not None:
+            raise ValueError("duration is not supported with sinc_interp_hann")
+        from mlx_audio.resample import sinc_resample
+
+        samples, rate = audio_read(audio, dtype="float32", always_2d=True)
+        mono = mx.array(samples.mean(axis=1))
+        samples = np.array(sinc_resample(mono, rate, sample_rate))
+    else:
+        samples, _ = audio_read(
+            audio,
+            dtype="float32",
+            sample_rate=sample_rate,
+            nchannels=1,
+            duration=duration,
+        )
 
     # Random segment selection
     if segment_duration is not None:

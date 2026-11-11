@@ -2349,6 +2349,90 @@ class TestSoprano(unittest.TestCase):
         self.assertEqual(normalize_numbers("10K"), "ten thousand")
         self.assertEqual(normalize_numbers("25M"), "twenty five million")
 
+    def test_decimal_numbers(self):
+        from mlx_audio.tts.models.soprano.text import clean_text, normalize_numbers
+
+        # Decimals must be spoken, not left as a literal "word.word" token.
+        self.assertEqual(normalize_numbers("3.14"), "three point fourteen")
+        self.assertEqual(normalize_numbers("2.5"), "two point five")
+        self.assertEqual(normalize_numbers("version 2.0"), "version two point zero")
+        self.assertEqual(
+            clean_text("I have 2.5 liters"), "i have two point five liters"
+        )
+        # Dollar amounts still route through the currency handler.
+        self.assertIn("dollar", normalize_numbers("$3.50"))
+        # Bare integers are unaffected.
+        self.assertEqual(normalize_numbers("I have 5 cats"), "I have five cats")
+
+    def test_times(self):
+        from mlx_audio.tts.models.soprano.text import clean_text
+
+        # Times are spoken, not read as "three.thirty" after ":" becomes ".".
+        self.assertEqual(
+            clean_text("Meet at 3:30 tomorrow."), "meet at three thirty tomorrow."
+        )
+        self.assertEqual(clean_text("At 9:05 we eat."), "at nine oh five we eat.")
+        self.assertEqual(clean_text("At 3:00 we eat."), "at three o'clock we eat.")
+        self.assertEqual(clean_text("It is 14:00 now."), "it is fourteen hundred now.")
+        self.assertEqual(
+            clean_text("It took 1:05:09 total."), "it took one oh five oh nine total."
+        )
+
+    def test_fractional_seconds(self):
+        from mlx_audio.tts.models.soprano.text import clean_text
+
+        cases = {
+            "1:00:00.5": "one oh oh zero point five",
+            "1:05:00.5": "one oh five zero point five",
+            "00:00:00.5": "zero oh oh zero point five",
+            "1:05:01.5": "one oh five oh one point five",
+            "1:05:10.5": "one oh five ten point five",
+            "1:05:00": "one oh five",
+        }
+        for timestamp, expected in cases.items():
+            with self.subTest(timestamp=timestamp):
+                self.assertEqual(
+                    clean_text(f"It took {timestamp} total."),
+                    f"it took {expected} total.",
+                )
+
+    def test_numbers_next_to_letters(self):
+        from mlx_audio.tts.models.soprano.text import clean_text
+
+        # A number glued to a letter is split from it before it is spoken, as in
+        # Soprano's reference normalizer, instead of becoming "tenx".
+        self.assertEqual(clean_text("It is 10x faster."), "it is ten x faster.")
+        self.assertEqual(clean_text("It is 70\u00b0F."), "it is seventy f.")
+        self.assertEqual(clean_text("Drink H2O."), "drink h two o.")
+        self.assertEqual(clean_text("Meet at 3:30pm."), "meet at three thirty pm.")
+        # Ordinals and K/M/B/T suffixes are expanded first and keep working.
+        self.assertEqual(clean_text("The 21st lap."), "the twenty first lap.")
+        self.assertEqual(clean_text("It is 10K."), "it is ten thousand.")
+
+    def test_phone_numbers(self):
+        from mlx_audio.tts.models.soprano.text import clean_text
+
+        # Phone numbers are read digit by digit in three groups, as in Soprano's
+        # reference normalizer, instead of as three large numbers.
+        self.assertEqual(
+            clean_text("Call 555-123-4567 now."),
+            "call five five five, one two three, four five six seven now.",
+        )
+        self.assertEqual(
+            clean_text("Call (415) 555-0123 today."),
+            "call four one five, five five five, zero one two three today.",
+        )
+        self.assertEqual(
+            clean_text("Fax 555.123.4567."),
+            "fax five five five, one two three, four five six seven.",
+        )
+        # Digits inside a longer number are not a phone number.
+        self.assertEqual(
+            clean_text("Order 12345 678 9012 shipped."),
+            "order twelve thousand three hundred forty five six hundred seventy eight"
+            " nine thousand twelve shipped.",
+        )
+
     def test_expand_abbreviations(self):
         """Test abbreviation expansion."""
         from mlx_audio.tts.models.soprano.text import expand_abbreviations
@@ -6709,6 +6793,38 @@ class TestKugelAudioModel(unittest.TestCase):
         self.assertIsNone(sched._step_index)  # pylint: disable=protected-access
         self.assertEqual(sched.lower_order_nums, 0)
 
+    def test_sample_speech_tokens_passes_float_timesteps(self):
+        """The diffusion head must get float timesteps: its sinusoidal
+        embedding is cast to t's dtype, so int32 timesteps zero it."""
+        from mlx_audio.tts.models.vibevoice.diffusion_head import (
+            DiffusionHead,
+            TimestepEmbedder,
+        )
+
+        model = self._make_model()
+        model.ddpm_inference_steps = 3
+        hidden = model.config.decoder_config.hidden_size
+        seen = []
+        original = DiffusionHead.__call__
+
+        def recording(self, noisy_images, timesteps, condition):
+            seen.append(timesteps)
+            return original(self, noisy_images, timesteps, condition)
+
+        with patch.object(DiffusionHead, "__call__", recording):
+            model.sample_speech_tokens(mx.zeros((1, hidden)))
+            model.sample_speech_tokens(
+                mx.zeros((1, hidden)),
+                cfg_scale=3.0,
+                neg_condition=mx.zeros((1, hidden)),
+            )
+
+        self.assertEqual(len(seen), 6)  # 3 steps, without and with CFG
+        for t in seen:
+            self.assertTrue(mx.issubdtype(t.dtype, mx.floating))
+            emb = TimestepEmbedder.timestep_embedding(t, 256)
+            self.assertGreater(mx.abs(emb).max().item(), 0.5)
+
 
 class TestAudioDiTModel(unittest.TestCase):
     @staticmethod
@@ -6806,6 +6922,18 @@ class TestAudioDiTModel(unittest.TestCase):
             total *= s
         self.assertEqual(total, cfg.vae_config.downsampling_ratio)
 
+    # -- text --
+
+    def test_normalize_text_replaces_quotes(self):
+        from mlx_audio.tts.models.longcat_audiodit.longcat_audiodit import (
+            _normalize_text,
+        )
+
+        self.assertEqual(
+            _normalize_text('He said "Hi" and \u201cHello\u201d, \u2018bye\u2019.'),
+            "he said hi and hello , bye .",
+        )
+
     # -- forward --
 
     def test_vae_encode_decode_shapes(self):
@@ -6851,6 +6979,24 @@ class TestAudioDiTModel(unittest.TestCase):
         self.assertEqual(latent.shape[2], self.cfg.latent_dim)
         self.assertEqual(latent.shape[1], prompt_dur)
         self.assertGreater(prompt_dur, 0)
+
+    def test_stream_decode_emits_each_frame_once(self):
+        ratio = self.cfg.vae_config.downsampling_ratio
+        sr = self.cfg.sampling_rate
+        # 24-frame chunks with 6 frames of overlap, so an 18-frame hop.
+        for total_frames in range(1, 61):
+            with self.subTest(total_frames=total_frames):
+                latent = mx.random.normal((1, total_frames, self.cfg.latent_dim))
+                results = list(
+                    self.model._stream_decode(
+                        latent, sr, 0.0, chunk_seconds=0.008, overlap_seconds=0.002
+                    )
+                )
+                self.assertEqual(sum(r.samples for r in results), total_frames * ratio)
+                self.assertEqual(
+                    [r.is_final_chunk for r in results],
+                    [False] * (len(results) - 1) + [True],
+                )
 
     # -- sanitize --
 
@@ -8562,6 +8708,14 @@ class TestMeloTTSText(unittest.TestCase):
         self.assertIn("forty two", text_normalize("42"))
         self.assertIn("three point one four", text_normalize("3.14"))
 
+    def test_text_normalize_decimal_zeros(self):
+        from mlx_audio.tts.models.melotts.text import text_normalize
+
+        self.assertEqual(
+            text_normalize("It costs 2.50 now."), "it costs two point five zero now."
+        )
+        self.assertEqual(text_normalize("1.05"), "one point zero five")
+
     def _require_g2p(self):
         try:
             import g2p_en  # noqa: F401
@@ -8922,6 +9076,53 @@ class TestVoxCPM2Config(unittest.TestCase):
             {"dit_config": {"mean_mode": True, "cfm_config": {}}}
         )
         self.assertTrue(config.dit_config.dit_mean_mode)
+
+
+class TestVoxCPM2Dtype(unittest.TestCase):
+    @staticmethod
+    def _tiny_lm_config():
+        from mlx_audio.tts.models.voxcpm2.config import LMConfig
+
+        return LMConfig(
+            hidden_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            intermediate_size=64,
+            vocab_size=16,
+            rope_long_factor=[1.0] * 4,
+            rope_short_factor=[1.0] * 4,
+        )
+
+    def test_lm_keeps_weight_dtype_through_rotary_embedding(self):
+        from mlx_audio.tts.models.voxcpm2.minicpm import MiniCPMModel
+
+        lm = MiniCPMModel(self._tiny_lm_config())
+        lm.set_dtype(mx.bfloat16)
+        hidden, cache = lm(mx.random.normal((1, 5, 32)).astype(mx.bfloat16))
+        self.assertEqual(hidden.dtype, mx.bfloat16)
+        self.assertEqual(cache[0][0].dtype, mx.bfloat16)
+
+    def test_dit_samples_in_conditioning_dtype(self):
+        from mlx_audio.tts.models.voxcpm2.config import CFMConfig
+        from mlx_audio.tts.models.voxcpm2.dit import UnifiedCFM, VoxCPMLocDiTV2
+
+        cfm = UnifiedCFM(
+            in_channels=4,
+            cfm_params=CFMConfig(),
+            estimator=VoxCPMLocDiTV2(self._tiny_lm_config(), in_channels=4),
+        )
+        cfm.set_dtype(mx.bfloat16)
+        mu = mx.random.normal((1, 64)).astype(mx.bfloat16)
+        cond = mx.random.normal((1, 4, 2))
+        feat = cfm.sample(mu, n_timesteps=4, patch_size=2, cond=cond, cfg_value=2.0)
+        self.assertEqual(feat.dtype, mx.bfloat16)
+
+    def test_continuation_reads_a_bfloat16_audio_mask(self):
+        from mlx_audio.tts.models.voxcpm2.voxcpm2 import _audio_indices
+
+        mask = mx.array([[0, 1, 0, 1, 1]]).astype(mx.bfloat16)
+        self.assertEqual(_audio_indices(mask).tolist(), [1, 3, 4])
 
 
 class TestVoxCPM2Registration(unittest.TestCase):

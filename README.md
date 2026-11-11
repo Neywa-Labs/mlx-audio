@@ -1,14 +1,35 @@
+<h1 align="center">MLX-Audio</h1>
 
-# MLX-Audio
+[![Every voice task, one engine. Runs locally on your Mac. Install with pip install -U mlx-audio or try it in Nativ.](https://raw.githubusercontent.com/Blaizzy/mlx-audio/70f6291ee79fcfe1a3cbfdde2ea6170bfa91339d/docs/assets/mlx-audio-banner.png)](https://runnativ.ai/)
 
-<a href="https://trendshift.io/repositories/13625" target="_blank"><img src="https://trendshift.io/api/badge/repositories/13625" alt="Blaizzy%2Fmlx-audio | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+<p align="center">
+  <strong>Run audio models on Apple Silicon.</strong> Text-to-speech, speech-to-text, speech-to-speech, and music generation. Built on MLX.
+</p>
 
-[![PyPI version](https://img.shields.io/pypi/v/mlx-audio.svg)](https://pypi.org/project/mlx-audio/)
-[![Python](https://img.shields.io/pypi/pyversions/mlx-audio.svg)](https://pypi.org/project/mlx-audio/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![GitHub stars](https://img.shields.io/github/stars/Blaizzy/mlx-audio.svg?style=social)](https://github.com/Blaizzy/mlx-audio)
+<p align="center">
+  <a href="#installation"><strong>Installation</strong></a> &middot;
+  <a href="https://neywa-labs.github.io/mlx-audio/">Documentation</a> &middot;
+  <a href="https://github.com/Blaizzy/mlx-audio/releases">Releases</a>
+</p>
 
-The best audio processing library built on Apple's MLX framework, providing fast and efficient text-to-speech (TTS), speech-to-text (STT), speech-to-speech (STS), music generation, and more on Apple Silicon.
+<p align="center">
+  macOS &middot; Apple silicon
+</p>
+
+<p align="center">
+  Built by <a href="https://www.neywalabs.ai/">Neywa Labs</a>, the local AI company behind <a href="https://runnativ.ai/">Nativ</a>.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Blaizzy/mlx-audio/actions/workflows/python-publish.yml"><img src="https://github.com/Blaizzy/mlx-audio/actions/workflows/python-publish.yml/badge.svg" alt="Upload Python Package"></a>
+  <a href="https://pypi.org/project/mlx-audio/"><img src="https://img.shields.io/pypi/v/mlx-audio" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/mlx-audio/"><img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+"></a>
+  <a href="https://github.com/Blaizzy/mlx-audio/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Blaizzy/mlx-audio" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <a href="https://trendshift.io/repositories/13625" target="_blank"><img src="https://trendshift.io/api/badge/repositories/13625" alt="Blaizzy/mlx-audio | Trendshift" width="250" height="55"></a>
+</p>
 
 ## Table of Contents
 
@@ -41,7 +62,7 @@ The best audio processing library built on Apple's MLX framework, providing fast
 
 ### Using pip
 ```bash
-pip install mlx-audio
+pip install -U mlx-audio
 ```
 
 ### Using uv to install only the command line tools
@@ -120,6 +141,7 @@ for result in model.generate(
 | **Kokoro** | Fast, high-quality multilingual TTS | EN, JA, ZH, FR, ES, IT, PT, HI | [bf16](https://huggingface.co/mlx-community/Kokoro-82M-bf16), [8bit](https://huggingface.co/mlx-community/Kokoro-82M-8bit), [6bit](https://huggingface.co/mlx-community/Kokoro-82M-6bit), [4bit](https://huggingface.co/mlx-community/Kokoro-82M-4bit) |
 | **KittenTTS** | Compact KittenTTS 0.8 models for edge-friendly TTS | EN | [nano](https://huggingface.co/mlx-community/kitten-tts-nano-0.8), [micro](https://huggingface.co/mlx-community/kitten-tts-micro-0.8), [mini](https://huggingface.co/mlx-community/kitten-tts-mini-0.8), [collection](https://huggingface.co/collections/mlx-community/kittentts) |
 | **Qwen3-TTS** | Alibaba's multilingual TTS with voice design | ZH, EN, JA, KO, + more | [mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16) |
+| [**ZONOS3-Mini**](mlx_audio/tts/models/zonos3/README.md) | Multilingual TTS with 27 voices, voice cloning, and streaming at 44.1 kHz | Multilingual | [mlx-community/ZONOS3-Mini](https://huggingface.co/mlx-community/ZONOS3-Mini) |
 | [**Audio8 TTS Realistic**](docs/models/tts/audio8.md) | 0.6B multilingual TTS with voice cloning and 44.1 kHz output | 23 languages | [BF16](https://huggingface.co/nativ-community/Audio8-TTS-Realistic-0.6b-bf16), [4-bit](https://huggingface.co/nativ-community/Audio8-TTS-Realistic-0.6b-4bit), [8-bit](https://huggingface.co/nativ-community/Audio8-TTS-Realistic-0.6b-8bit) |
 | [**Maya2 Native**](mlx_audio/tts/models/maya2/README.md) | Streaming TTS with 20 voices and voice cloning | 11 Indic languages + EN | [maya-research/maya2-native](https://huggingface.co/maya-research/maya2-native) |
 | **Higgs Audio v3** | 4B conversational TTS with voice cloning and inline control tokens | 100 languages | [bosonai/higgs-audio-v3-tts-4b](https://huggingface.co/bosonai/higgs-audio-v3-tts-4b) |
@@ -162,6 +184,7 @@ for result in model.generate(
 | **Phonon-2 / 2.5** | Five-value Parakeet TDT | EN / 25 European languages | [2.5](https://huggingface.co/FermionResearch/Phonon-2.5) · [2.5 English](https://huggingface.co/FermionResearch/Phonon-2.5-English) · [2](https://huggingface.co/mlx-community/Phonon-2) · [README](mlx_audio/stt/models/phonon2/README.md) |
 | **Nemotron 3.5 Transcribe** | Hybrid speech language model with word timestamps, MTP speculative decoding, translation, speaker attribution, and audio prompts | Multilingual | [NVIDIA checkpoints](https://huggingface.co/collections/nvidia/nemotron-35-transcribe) · [MLX checkpoints](https://huggingface.co/collections/nativ-community/nemotron-35-transcribe) · [Support and usage](mlx_audio/stt/models/nemotron_transcribe/README.md) |
 | **Nemotron 3.5 ASR (streaming)** | NVIDIA's cache-aware streaming FastConformer-RNNT with language-ID prompting | 40 language-locales | [mlx-community/nemotron-3.5-asr-streaming-0.6b](https://huggingface.co/mlx-community/nemotron-3.5-asr-streaming-0.6b) · [README](mlx_audio/stt/models/nemotron_asr/README.md) |
+| **Nemotron Unified ASR** | NVIDIA's FastConformer-RNNT for offline and buffered streaming in one checkpoint, 160 ms-2.08 s latency | 25 European languages | [8-bit](https://huggingface.co/mlx-community/nemotron-labs-unified-asr-0.6b-8bit) · [README](mlx_audio/stt/models/nemotron_asr/README.md) |
 | **Nemotron Speech Streaming 0.6B** | NVIDIA's English FastConformer-RNNT with 80/160/560/1120 ms streaming modes | EN | [nvidia/nemotron-speech-streaming-en-0.6b](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b) · [README](mlx_audio/stt/models/nemotron_asr/README.md) |
 | **Voxtral** | Mistral's speech model | Multiple | [mlx-community/Voxtral-Mini-3B-2507-bf16](https://huggingface.co/mlx-community/Voxtral-Mini-3B-2507-bf16) |
 | **Voxtral Realtime** | Mistral's 4B streaming STT | Multiple | [4bit](https://huggingface.co/mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit), [fp16](https://huggingface.co/mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16) |
@@ -206,6 +229,7 @@ See the model READMEs for API details, streaming examples, and conversion steps.
 | Model | Description | Languages | Repo |
 |-------|-------------|-----------|------|
 | **MiniMax Music 3** | Hierarchical AR + flow-matching song generation with lyrics and 44.1 kHz stereo output | Multilingual lyrics | [BF16](https://huggingface.co/mlx-community/MiniMax-Music3-bf16), [8-bit](https://huggingface.co/mlx-community/MiniMax-Music3-8bit), [6-bit](https://huggingface.co/mlx-community/MiniMax-Music3-6bit), [4-bit](https://huggingface.co/mlx-community/MiniMax-Music3-4bit), [MXFP8](https://huggingface.co/mlx-community/MiniMax-Music3-mxfp8), [MXFP4](https://huggingface.co/mlx-community/MiniMax-Music3-mxfp4), [NVFP4](https://huggingface.co/mlx-community/MiniMax-Music3-nvfp4), [guide](mlx_audio/music/models/minimax_music3/README.md) |
+| **Stable Audio 3** | Text to sound effects or music, 44.1 kHz stereo, up to 120 seconds | EN | [small-sfx](https://huggingface.co/mlx-community/stable-audio-3-small-sfx), [small-music](https://huggingface.co/mlx-community/stable-audio-3-small-music) |
 
 ## Model Examples
 

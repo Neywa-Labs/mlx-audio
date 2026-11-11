@@ -32,7 +32,7 @@ ZH_DUR_PER_CHAR = 0.21
 
 def _normalize_text(text: str) -> str:
     text = text.lower()
-    text = re.sub(r'["""\u2018\u2019]', " ", text)
+    text = re.sub(r'["\u201c\u201d\u2018\u2019]', " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
@@ -276,6 +276,9 @@ class Model(nn.Module):
                 is_streaming_chunk=True,
                 is_final_chunk=is_last,
             )
+
+            if is_last:
+                break
 
             chunk_idx += 1
             start += hop_frames

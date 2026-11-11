@@ -207,6 +207,33 @@ class TestZonos2TextNorm(unittest.TestCase):
             "and saved seven point five percent.",
         )
 
+    def test_currency_scale_words_are_fully_consumed(self):
+        normalizer = TTSTextNormalizer()
+        # Spelled-out magnitudes must be consumed whole; the quantity
+        # alternation previously matched the single-letter "m"/"b" prefix
+        # of "million"/"billion"/"bn", leaking the remainder into the output
+        # (e.g. "$5 million" -> "five million dollarsillion").
+        self.assertEqual(
+            normalizer.normalize("The deal is worth $5 million.", "en"),
+            "The deal is worth five million dollars.",
+        )
+        self.assertEqual(
+            normalizer.normalize("I paid $2 billion.", "en"),
+            "I paid two billion dollars.",
+        )
+        self.assertEqual(
+            normalizer.normalize("It cost $10 bn.", "en"),
+            "It cost ten billion dollars.",
+        )
+        # A trailing word that merely starts with a scale letter must not be
+        # eaten by the (now word-bounded) single-letter quantity suffix.
+        self.assertEqual(
+            normalizer.normalize("$5 mega", "en"),
+            "five dollars mega",
+        )
+        # Abbreviated suffixes glued to the amount still work.
+        self.assertEqual(normalizer.normalize("$5M", "en"), "five million dollars")
+
     def test_numeric_dates_ordinals_units_and_phone_numbers(self):
         normalizer = TTSTextNormalizer()
         self.assertEqual(
@@ -222,6 +249,23 @@ class TestZonos2TextNorm(unittest.TestCase):
         self.assertEqual(
             normalizer.normalize("Mix 1/2 cup on 06/13/2026.", "en"),
             "Mix one half cup on june thirteenth twenty twenty six.",
+        )
+
+    def test_bare_time_keeps_space_before_next_word(self):
+        normalizer = TTSTextNormalizer()
+        # Without am/pm, the space after the time is not part of the match, so the
+        # next word is not glued to the spoken time.
+        self.assertEqual(
+            normalizer.normalize("Meet at 3:30 tomorrow.", "en"),
+            "Meet at three thirty tomorrow.",
+        )
+        self.assertEqual(
+            normalizer.normalize("9:05 and later", "en"), "nine oh five and later"
+        )
+        self.assertEqual(normalizer.normalize("14:00 sharp", "en"), "fourteen sharp")
+        # With am/pm, the space before the suffix is still consumed.
+        self.assertEqual(
+            normalizer.normalize("3:30 pm today", "en"), "three thirty p m today"
         )
 
     def test_non_english_text_passes_through(self):
