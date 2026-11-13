@@ -577,6 +577,7 @@ class TokenizerEncoder(nn.Module):
             # Input is [B, 1, T], transpose to [B, T, 1]
             x = x.transpose(0, 2, 1)
 
+        x = x.astype(self.downsample_layers[0].conv.weight.dtype)
         for i in range(self.n_stages):
             x = self.downsample_layers[i](x)
             mx.eval(x)

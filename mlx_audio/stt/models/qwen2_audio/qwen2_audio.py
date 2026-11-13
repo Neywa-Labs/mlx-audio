@@ -121,13 +121,13 @@ class Qwen2AudioEncoder(nn.Module):
 
     def __call__(self, input_features: mx.array) -> mx.array:
         # input_features: (B, n_mels, T) -> transpose to (B, T, n_mels) for Conv1d
-        x = input_features.transpose(0, 2, 1)
+        x = input_features.transpose(0, 2, 1).astype(self.conv1.weight.dtype)
         x = nn.gelu(self.conv1(x))
         x = nn.gelu(self.conv2(x))
 
         # Add positional embeddings
         T = x.shape[1]
-        x = x + self.embed_positions[:T]
+        x = (x + self.embed_positions[:T]).astype(x.dtype)
 
         # Transformer layers
         for layer in self.layers:

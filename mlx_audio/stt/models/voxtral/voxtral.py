@@ -173,6 +173,7 @@ class Encoder(nn.Module):
         mask: Optional[mx.array] = None,
     ) -> mx.array:
 
+        x = x.astype(self.conv1.weight.dtype)
         x = nn.gelu(self.conv1(x))
         x = nn.gelu(self.conv2(x))
 

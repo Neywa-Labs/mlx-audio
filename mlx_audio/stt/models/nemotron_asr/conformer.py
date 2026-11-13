@@ -221,7 +221,7 @@ class CausalDwStridingSubsampling(nn.Module):
         current = [int(l) for l in lengths.tolist()]
         out_lengths = mx.array([self._calc_length(l) for l in current], dtype=mx.int32)
         mask_padding = not self.causal
-        x = mx.expand_dims(x, axis=-1)
+        x = mx.expand_dims(x, axis=-1).astype(self.conv[0].weight.dtype)
         for i, layer in enumerate(self.conv):
             if mask_padding:
                 valid = mx.arange(x.shape[1])[None, :] < mx.array(current)[:, None]

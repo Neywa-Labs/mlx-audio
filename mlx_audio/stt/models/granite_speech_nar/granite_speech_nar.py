@@ -144,7 +144,7 @@ class Model(nn.Module):
 
         if input_features.ndim == 2:
             input_features = input_features[None]
-        input_features = input_features.astype(mx.bfloat16)
+        input_features = input_features.astype(self.encoder.input_linear.weight.dtype)
 
         enc_out = self.encoder(input_features)
         bpe_argmax = mx.argmax(enc_out.bpe_logits[0], axis=-1).astype(mx.int32)

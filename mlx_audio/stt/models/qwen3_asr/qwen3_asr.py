@@ -344,6 +344,7 @@ class AudioEncoder(nn.Module):
         input_features: mx.array,
         feature_attention_mask: Optional[mx.array] = None,
     ) -> mx.array:
+        input_features = input_features.astype(self.conv2d1.weight.dtype)
         if feature_attention_mask is not None:
             feature_lens = feature_attention_mask.sum(axis=-1).astype(mx.int32)
         else:
@@ -418,7 +419,7 @@ class AudioEncoder(nn.Module):
         x = self.conv_out(x)
 
         pos_emb = self.positional_embedding(x.shape[1])
-        x = x + pos_emb[None, :, :]
+        x = (x + pos_emb[None, :, :]).astype(x.dtype)
 
         hidden_list = []
         for i in range(x.shape[0]):

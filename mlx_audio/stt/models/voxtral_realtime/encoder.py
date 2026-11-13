@@ -175,7 +175,9 @@ class AudioEncoder(nn.Module):
         Returns:
             mx.array: [seq, dim] conv output ready for transformer layers
         """
-        x = mel.T[None, :, :]  # [1, frames, 128]
+        x = mel.T[None, :, :].astype(
+            self.conv_layers_0_conv.conv.weight.dtype
+        )  # [1, frames, 128]
         x = nn.gelu(self.conv_layers_0_conv(x))
         x = nn.gelu(self.conv_layers_1_conv(x))
         x = x.squeeze(0)  # [seq, 1280]

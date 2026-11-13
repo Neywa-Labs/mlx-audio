@@ -79,12 +79,12 @@ class HiggsAudioEncoder(nn.Module):
         self.layer_norm = nn.LayerNorm(embed_dim)
 
     def __call__(self, input_features: mx.array) -> mx.array:
-        x = input_features.transpose(0, 2, 1)
+        x = input_features.transpose(0, 2, 1).astype(self.conv1.weight.dtype)
         x = nn.gelu(self.conv1(x))
         x = nn.gelu(self.conv2(x))
 
         T = x.shape[1]
-        x = x + self.embed_positions.weight[:T][None]
+        x = (x + self.embed_positions.weight[:T][None]).astype(x.dtype)
 
         for layer in self.layers:
             x = layer(x)

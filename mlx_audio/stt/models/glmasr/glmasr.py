@@ -241,6 +241,7 @@ class WhisperEncoder(nn.Module):
 
     def __call__(self, input_features: mx.array) -> mx.array:
         """Encode audio features."""
+        input_features = input_features.astype(self.conv1.weight.dtype)
         hidden_states = nn.gelu(self.conv1(input_features))
         hidden_states = nn.gelu(self.conv2(hidden_states))
 
@@ -248,7 +249,7 @@ class WhisperEncoder(nn.Module):
         if not self.use_rope:
             seq_len = hidden_states.shape[1]
             embed_pos = self.embed_positions.weight[:seq_len]
-            hidden_states = hidden_states + embed_pos
+            hidden_states = (hidden_states + embed_pos).astype(hidden_states.dtype)
 
         for layer in self.layers:
             hidden_states = layer(hidden_states)

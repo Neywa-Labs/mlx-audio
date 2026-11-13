@@ -384,7 +384,7 @@ class AudioEncoder(nn.Module):
               NOT PyTorch's NCL format (batch, channels, length).
         """
         # Convert mel (n_mels, L) → NLC (1, L, n_mels)
-        x = mel.T[None]  # (1, L, n_mels)
+        x = mel.T[None].astype(self.conv1.weight.dtype)  # (1, L, n_mels)
         x = nn.gelu(self.conv1(x))  # (1, L, d_model)
         x = nn.gelu(self.conv2(x))  # (1, L//2, d_model)
 
