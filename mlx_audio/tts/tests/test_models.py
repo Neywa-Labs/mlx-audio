@@ -3619,6 +3619,9 @@ class TestQwen3TTSGenerateICL(unittest.TestCase):
                     ref_text="Ref",
                     max_tokens=10,
                     repetition_penalty=1.5,
+                    # controlled_sample counts one CB0 draw per step; the
+                    # EOS-masked hold draw would be counted as a second step.
+                    eos_hold_frames=0,
                 )
             )
 

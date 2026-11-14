@@ -11,6 +11,8 @@ import mlx.core as mx
 from mlx_audio.lm.models.cache import BatchKVCache, KVCache
 from mlx_audio.tts.continuous import TTSBatchEvent, TTSBatchItem, TTSBatchOptions
 
+from .qwen3_tts import _apply_eos_hold
+
 
 def _format_duration(seconds: float) -> str:
     hours = int(seconds // 3600)
@@ -32,6 +34,7 @@ class _ActiveRequest:
     generated_codes: List[mx.array] = field(default_factory=list)
     generated_token_ids: List[int] = field(default_factory=list)
     trailing_idx: int = 0
+    eos_hold_left: int = -1
 
 
 class Qwen3TTSBatchSession:
@@ -42,7 +45,7 @@ class Qwen3TTSBatchSession:
     boundaries.
     """
 
-    def __init__(self, model, options: TTSBatchOptions):
+    def __init__(self, model, options: TTSBatchOptions, eos_hold_frames: int = 1):
         if model.speech_tokenizer is None:
             raise ValueError("Speech tokenizer not loaded")
 
@@ -58,6 +61,7 @@ class Qwen3TTSBatchSession:
         self.config = model.config.talker_config
         self.eos_token_id = self.config.codec_eos_token_id
         self.suppress_tokens = model._suppress_codec_tokens(self.eos_token_id)
+        self.eos_hold_frames = eos_hold_frames
 
         self._pending: List[TTSBatchItem] = []
         self._active: List[_ActiveRequest] = []
@@ -131,10 +135,11 @@ class Qwen3TTSBatchSession:
             cache=cache,
             attention_mask=batch_inputs.attention_mask,
         )
-        next_token_batch, code_tokens, all_codes = self._sample_code_tokens(
+        next_token_batch, code_tokens, all_codes, hold_left = self._sample_code_tokens(
             logits,
             hidden,
             generated_tokens_per_seq=[[] for _ in pending],
+            eos_hold_left=[-1] * len(pending),
         )
         finished = next_token_batch[:, 0] == self.eos_token_id
         next_input_embeds = self._next_input_embeds_for_batch(
@@ -147,6 +152,7 @@ class Qwen3TTSBatchSession:
         caches_by_request = self._extract_batch_cache_rows(cache, len(pending))
         finished_cpu = finished.tolist()
         token_ids_cpu = next_token_batch[:, 0].tolist()
+        hold_left_cpu = hold_left.tolist()
 
         events: list[TTSBatchEvent] = []
         for index, item in enumerate(pending):
@@ -163,6 +169,7 @@ class Qwen3TTSBatchSession:
                 ],
                 tts_pad_embed=batch_inputs.tts_pad_embed,
                 trailing_idx=1,
+                eos_hold_left=hold_left_cpu[index],
             )
 
             if not finished_cpu[index]:
@@ -191,10 +198,11 @@ class Qwen3TTSBatchSession:
             cache=cache,
             attention_mask=attention_mask,
         )
-        next_token_batch, code_tokens, all_codes = self._sample_code_tokens(
+        next_token_batch, code_tokens, all_codes, hold_left = self._sample_code_tokens(
             logits,
             hidden,
             generated_tokens_per_seq=[state.generated_token_ids for state in states],
+            eos_hold_left=[state.eos_hold_left for state in states],
         )
         finished = next_token_batch[:, 0] == self.eos_token_id
         next_input_embeds = self._next_input_embeds_for_states(states, code_tokens)
@@ -202,12 +210,14 @@ class Qwen3TTSBatchSession:
         caches_by_state = self._extract_batch_cache_rows(cache, batch_size)
         finished_cpu = finished.tolist()
         token_ids_cpu = next_token_batch[:, 0].tolist()
+        hold_left_cpu = hold_left.tolist()
 
         events: list[TTSBatchEvent] = []
         still_active: list[_ActiveRequest] = []
         for index, state in enumerate(states):
             state.cache = caches_by_state[index]
             state.input_embeds = next_input_embeds[index : index + 1]
+            state.eos_hold_left = hold_left_cpu[index]
 
             if not finished_cpu[index]:
                 state.generated_token_ids.append(token_ids_cpu[index])
@@ -231,7 +241,8 @@ class Qwen3TTSBatchSession:
         hidden: mx.array,
         *,
         generated_tokens_per_seq: list[list[int]],
-    ) -> Tuple[mx.array, list[mx.array], mx.array]:
+        eos_hold_left: list[int],
+    ) -> Tuple[mx.array, list[mx.array], mx.array, mx.array]:
         next_token_batch = self.model._sample_token_batch(
             logits,
             temperature=self.options.temperature,
@@ -241,6 +252,24 @@ class Qwen3TTSBatchSession:
             generated_tokens_per_seq=generated_tokens_per_seq,
             suppress_tokens=self.suppress_tokens,
         )
+        hold_left = mx.array(eos_hold_left, dtype=mx.int32)
+        if self.eos_hold_frames > 0:
+            without_eos = self.model._sample_token_batch(
+                logits,
+                temperature=self.options.temperature,
+                top_k=self.options.top_k,
+                top_p=self.options.top_p,
+                repetition_penalty=self.options.repetition_penalty,
+                generated_tokens_per_seq=generated_tokens_per_seq,
+                suppress_tokens=self.suppress_tokens + [self.eos_token_id],
+            )
+            next_token_batch, hold_left = _apply_eos_hold(
+                next_token_batch,
+                without_eos,
+                hold_left,
+                self.eos_token_id,
+                self.eos_hold_frames,
+            )
 
         code_tokens, all_codes = self.model._predict_code_tokens(
             next_token_batch,
@@ -249,7 +278,7 @@ class Qwen3TTSBatchSession:
             top_k=self.options.top_k,
             top_p=self.options.top_p,
         )
-        return next_token_batch, code_tokens, all_codes
+        return next_token_batch, code_tokens, all_codes, hold_left
 
     def _next_input_embeds_for_batch(
         self,
