@@ -326,7 +326,21 @@ def _expand_time(m):
 
 
 def _expand_number(m):
-    return _number_to_words(int(m.group(0)))
+    num = int(m.group(0))
+    # Like the reference, read 1001 to 2999 in pairs, the way years are read:
+    # "nineteen ninety", "nineteen oh five", "two thousand five".
+    if 1000 < num < 3000:
+        if num == 2000:
+            return "two thousand"
+        if 2000 < num < 2010:
+            return "two thousand " + _number_to_words(num % 100)
+        if num % 100 == 0:
+            return _number_to_words(num // 100) + " hundred"
+        first, second = divmod(num, 100)
+        if second < 10:
+            return _number_to_words(first) + " oh " + _number_to_words(second)
+        return _number_to_words(first) + " " + _number_to_words(second)
+    return _number_to_words(num)
 
 
 _abbreviations = [

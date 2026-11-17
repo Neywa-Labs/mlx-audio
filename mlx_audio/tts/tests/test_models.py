@@ -8800,6 +8800,20 @@ class TestMeloTTSText(unittest.TestCase):
         self.assertEqual(text_normalize("at 7:00"), "at seven")
         self.assertEqual(text_normalize("3:30 amazing"), "three thirty amazing")
 
+    def test_text_normalize_years(self):
+        from mlx_audio.tts.models.melotts.text import text_normalize
+
+        self.assertEqual(
+            text_normalize("Born in 1990, moved in 2024."),
+            "born in nineteen ninety, moved in twenty twenty four.",
+        )
+        self.assertEqual(text_normalize("1905"), "nineteen oh five")
+        self.assertEqual(text_normalize("1900"), "nineteen hundred")
+        self.assertEqual(text_normalize("2000"), "two thousand")
+        self.assertEqual(text_normalize("2007"), "two thousand seven")
+        self.assertEqual(text_normalize("1000"), "one thousand")
+        self.assertEqual(text_normalize("3000"), "three thousand")
+
     def _require_g2p(self):
         try:
             import g2p_en  # noqa: F401
