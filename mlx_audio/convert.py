@@ -590,7 +590,7 @@ def load_weights(model_path: Path) -> dict:
 
     weights = {}
     for wf in weight_files:
-        if "tokenizer" in wf:
+        if "tokenizer" in Path(wf).name:
             continue
         weights.update(mx.load(wf))
 
