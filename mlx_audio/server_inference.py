@@ -16,6 +16,7 @@ class InferenceResultChunk:
     kind: str
     payload: Any = None
     error: BaseException | None = None
+    final: bool = False
 
 
 @dataclass
@@ -44,6 +45,11 @@ class InferenceRequest:
 
     def emit_data(self, payload: Any) -> None:
         self.result_queue.put(InferenceResultChunk(kind="data", payload=payload))
+
+    def emit_result(self, payload: Any) -> None:
+        self.result_queue.put(
+            InferenceResultChunk(kind="data", payload=payload, final=True)
+        )
 
     def emit_error(self, error: BaseException) -> None:
         self.result_queue.put(InferenceResultChunk(kind="error", error=error))

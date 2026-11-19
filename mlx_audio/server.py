@@ -335,7 +335,7 @@ class STTExecutionAdapter(BaseModelExecutionAdapter):
                         }
                     request.emit_data(json.dumps(sanitize_for_json(chunk_data)) + "\n")
             elif not request.cancel_event.is_set():
-                request.emit_data(json.dumps(sanitize_for_json(result)) + "\n")
+                request.emit_result(json.dumps(sanitize_for_json(result)) + "\n")
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -1188,9 +1188,7 @@ async def stt_transcriptions(
                         obj = json.loads(raw)
                     except Exception:
                         continue
-                    if isinstance(obj, dict) and (
-                        "segments" in obj or "language" in obj
-                    ):
+                    if chunk.final and isinstance(obj, dict):
                         full = obj
                     elif isinstance(obj, dict) and "text" in obj:
                         accumulated += obj.get("text") or ""

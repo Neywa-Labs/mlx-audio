@@ -416,6 +416,103 @@ def test_stt_transcriptions_default_format_preserves_ndjson(
         _json.loads(line)
 
 
+class _FakeStreamResult:
+    """Record shaped like the StreamingResult dataclasses streaming STT
+    models yield: delta text plus language/timing metadata."""
+
+    def __init__(
+        self,
+        text,
+        *,
+        is_final=False,
+        language=None,
+        start_time=None,
+        end_time=None,
+    ):
+        self.text = text
+        self.is_final = is_final
+        self.language = language
+        self.start_time = start_time
+        self.end_time = end_time
+
+
+def _post_streamed_transcription(client, mock_model_provider, chunks, *, data):
+    """POST a transcription whose model streams structured delta records.
+
+    The fake mirrors Qwen3-ASR: ``generate(stream=True)`` returns an iterator
+    of per-token text deltas followed by an empty chunk-final record, each
+    carrying the detected ``language``.
+    """
+
+    def generate(audio, *, stream=False, language=None, max_tokens=8192, **kwargs):
+        if stream:
+            return iter(chunks)
+        return {"text": "".join(c.text for c in chunks), "language": "en"}
+
+    mock_stt_model = MagicMock()
+    mock_stt_model.generate = generate
+    mock_model_provider.load_model = MagicMock(return_value=mock_stt_model)
+
+    return client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data={"model": "test_stt_model", **data},
+    )
+
+
+def _delta_stream_chunks():
+    """Qwen3-ASR-style records: two text deltas then an empty final event."""
+    return [
+        _FakeStreamResult("hello", language="en"),
+        _FakeStreamResult(" world", language="en"),
+        _FakeStreamResult(
+            "", is_final=True, language="en", start_time=0.0, end_time=1.0
+        ),
+    ]
+
+
+@pytest.mark.parametrize("response_format", ["text", "json", "verbose_json"])
+def test_stt_transcriptions_streamed_deltas_buffered_formats(
+    client, mock_model_provider, response_format
+):
+    """stream=true + a buffered response_format must join streamed deltas.
+
+    Regression: every structured chunk carries a ``language`` key (even when
+    null), which the collector treated as proof of a complete result, so the
+    empty end-of-stream record overwrote the accumulated transcript.
+    """
+    response = _post_streamed_transcription(
+        client,
+        mock_model_provider,
+        _delta_stream_chunks(),
+        data={"stream": "true", "response_format": response_format},
+    )
+    assert response.status_code == 200
+    if response_format == "text":
+        assert response.text == "hello world"
+    elif response_format == "json":
+        assert response.json() == {"text": "hello world"}
+    else:
+        assert response.json()["text"] == "hello world"
+
+
+def test_stt_transcriptions_streamed_deltas_keep_ndjson_wire(
+    client, mock_model_provider
+):
+    """The native ndjson stream still forwards each model record unchanged."""
+    response = _post_streamed_transcription(
+        client,
+        mock_model_provider,
+        _delta_stream_chunks(),
+        data={"stream": "true"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+    records = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert [r["text"] for r in records] == ["hello", " world", ""]
+    assert all("language" in r for r in records)
+
+
 # ---------------------------------------------------------------------------
 # WebSocket realtime streaming tests
 # ---------------------------------------------------------------------------
