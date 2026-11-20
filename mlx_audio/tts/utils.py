@@ -40,6 +40,8 @@ MODEL_REMAPPING = {
     "soprano": "soprano",
     "bailingmm": "bailingmm",
     "kitten": "kitten_tts",
+    "kokoro": "kokoro",
+    "kale_tts": "kale_tts",
     "echo_tts": "echo_tts",
     "fish_qwen3_omni": "fish_qwen3_omni",
     "irodori_tts": "irodori_tts",
