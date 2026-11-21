@@ -25,6 +25,8 @@ ASSISTANT_ROLE_PREFIX = "assistant\n"
 SENTENCE_END_PUNCTUATION = frozenset(".!?。！？；;")
 CLAUSE_SPLIT_PUNCTUATION = frozenset(",，、；;：:")
 CLOSING_PUNCTUATION = frozenset("\"'”’)]}）】》」』")
+# Marks that join digits (3.14, 1,000, 10:30) rather than end a sentence or clause.
+NUMBER_JOINING_PUNCTUATION = frozenset(".,:")
 
 
 class TextTokenizer(Protocol):
@@ -158,6 +160,14 @@ def split_text_by_punctuation(
     while index < len(normalized_text):
         character = normalized_text[index]
         current_chars.append(character)
+        if (
+            character in NUMBER_JOINING_PUNCTUATION
+            and 0 < index < len(normalized_text) - 1
+            and normalized_text[index - 1].isdigit()
+            and normalized_text[index + 1].isdigit()
+        ):
+            index += 1
+            continue
         if character in punctuation:
             lookahead = index + 1
             while (

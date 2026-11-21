@@ -9708,6 +9708,33 @@ class TestMossTTSNanoText(unittest.TestCase):
         self.assertGreaterEqual(len(chunks), 2)
         self.assertTrue(all(chunk.strip() for chunk in chunks))
 
+    def test_split_text_keeps_numbers_whole(self):
+        from mlx_audio.tts.models.moss_tts_nano.text import (
+            CLAUSE_SPLIT_PUNCTUATION,
+            SENTENCE_END_PUNCTUATION,
+            split_text_by_punctuation,
+        )
+
+        self.assertEqual(
+            split_text_by_punctuation(
+                "It costs 3.14 dollars. Version 2.0 shipped.",
+                SENTENCE_END_PUNCTUATION,
+            ),
+            ["It costs 3.14 dollars.", "Version 2.0 shipped."],
+        )
+        self.assertEqual(
+            split_text_by_punctuation(
+                "We sold 1,000 units at 10:30, then left", CLAUSE_SPLIT_PUNCTUATION
+            ),
+            ["We sold 1,000 units at 10:30,", "then left"],
+        )
+        self.assertEqual(
+            split_text_by_punctuation(
+                "I scored 3. 14 is next.", SENTENCE_END_PUNCTUATION
+            ),
+            ["I scored 3.", "14 is next."],
+        )
+
 
 class TestMossTTSNanoSampling(unittest.TestCase):
     def test_top_k_masks_low_scores(self):
