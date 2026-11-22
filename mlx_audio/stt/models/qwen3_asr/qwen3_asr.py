@@ -47,6 +47,79 @@ def _audio_duration(wav: np.ndarray, sr: int) -> float:
     return len(wav) / sr
 
 
+# Greedy decoding can loop on one token or a short phrase. A chunk stops when
+# its output ends in such a loop, and never runs past a budget that scales with
+# its duration (12 tokens/s is well above fast speech), so a short clip cannot
+# spend the whole max_tokens on a loop that is not an exact repetition.
+_REPETITION_THRESHOLD = 20
+_TOKENS_PER_SECOND = 12
+_MIN_CHUNK_TOKENS = 128
+
+
+def _chunk_token_budget(num_samples: int, sr: int, max_tokens: int) -> int:
+    budget = math.ceil(num_samples / sr * _TOKENS_PER_SECOND) + 32
+    return min(max_tokens, max(_MIN_CHUNK_TOKENS, budget))
+
+
+def _ends_in_repetition(
+    tokens: List[int], threshold: int = _REPETITION_THRESHOLD
+) -> bool:
+    """True when ``tokens`` end in a 1-10 token pattern repeated ``threshold``
+    times, which detect_and_fix_repetitions would collapse anyway."""
+    for length in range(1, 11):
+        span = length * threshold
+        if len(tokens) < span:
+            break
+        if tokens[-1] == tokens[-1 - length] and (
+            tokens[-span:] == tokens[-length:] * threshold
+        ):
+            return True
+    return False
+
+
+def detect_and_fix_repetitions(text: str, threshold: int = _REPETITION_THRESHOLD):
+    """Collapse runs of a character or a pattern (up to 20 characters) repeated
+    more than ``threshold`` times to one occurrence.
+
+    Port of ``detect_and_fix_repetitions`` from the official Qwen3-ASR toolkit
+    (qwen_asr/inference/utils.py, Copyright Alibaba Qwen team, Apache-2.0),
+    which applies it to every transcription.
+    """
+
+    def fix_char_repeats(s):
+        out, i = [], 0
+        while i < len(s):
+            j = i + 1
+            while j < len(s) and s[j] == s[i]:
+                j += 1
+            out.append(s[i] if j - i > threshold else s[i:j])
+            i = j
+        return "".join(out)
+
+    def fix_pattern_repeats(s, max_len=20):
+        n = len(s)
+        if n < threshold * 2:
+            return s
+        out, i = [], 0
+        while i <= n - threshold * 2:
+            for k in range(1, max_len + 1):
+                if i + k * threshold > n:
+                    break
+                pattern = s[i : i + k]
+                if all(
+                    s[i + r * k : i + r * k + k] == pattern for r in range(1, threshold)
+                ):
+                    end = i + threshold * k
+                    while end + k <= n and s[end : end + k] == pattern:
+                        end += k
+                    return "".join(out) + pattern + fix_pattern_repeats(s[end:])
+            out.append(s[i])
+            i += 1
+        return "".join(out) + s[i:]
+
+    return fix_pattern_repeats(fix_char_repeats(text))
+
+
 def split_audio_into_chunks(
     wav: np.ndarray,
     sr: int,
@@ -1034,6 +1107,7 @@ class Qwen3ASRModel(nn.Module):
                         )
 
         # Use generate_step from mlx_lm (handles chunked prefill automatically)
+        generated = []
         for token, logprobs in generate_step(
             prompt=prompt,
             input_embeddings=input_embeddings,
@@ -1051,6 +1125,10 @@ class Qwen3ASRModel(nn.Module):
                 break
 
             yield token, logprobs
+
+            generated.append(int(token))
+            if _ends_in_repetition(generated):
+                break
 
         if gen_pbar is not None:
             gen_pbar.close()
@@ -1147,6 +1225,10 @@ class Qwen3ASRModel(nn.Module):
 
             x = mx.stack(embeds, axis=0)  # (B, L, H), equal L
             bsz = x.shape[0]
+            budgets = [
+                _chunk_token_budget(len(c[0]), self.sample_rate, max_tokens)
+                for c in group
+            ]
             for i in range(bsz):
                 prompt_tokens[b0 + i] = x.shape[1]
 
@@ -1182,7 +1264,7 @@ class Qwen3ASRModel(nn.Module):
 
             out_ids = [[] for _ in range(bsz)]
             done = [False] * bsz
-            for _ in range(max_tokens):
+            for _ in range(max(budgets)):
                 if token_histories is not None:
                     for i in range(bsz):
                         if not done[i]:
@@ -1214,6 +1296,9 @@ class Qwen3ASRModel(nn.Module):
                         done[i] = True
                     else:
                         out_ids[i].append(t)
+                        done[i] = len(out_ids[i]) >= budgets[i] or (
+                            _ends_in_repetition(out_ids[i])
+                        )
                 if all(done):
                     break
                 y = next_y
@@ -1257,7 +1342,9 @@ class Qwen3ASRModel(nn.Module):
         list is not supported.
 
         Args:
-            max_tokens: Maximum tokens generated per chunk (default: 8192).
+            max_tokens: Maximum tokens generated per chunk (default: 8192). A
+                chunk also stops at 12 tokens per second of its audio (at least
+                128) and when its output ends in a repetition loop.
             chunk_duration: Maximum chunk duration in seconds (default: 1200 = 20 min).
             min_chunk_duration: Minimum chunk duration in seconds (default: 1.0).
             stream: If True, return a generator that yields tokens as they are generated.
@@ -1457,6 +1544,7 @@ class Qwen3ASRModel(nn.Module):
             ) in zip(chunks, chunk_end_times, texts, gen_toks, prompt_toks, processed):
                 if not was_processed:
                     continue
+                text = detect_and_fix_repetitions(text)
                 chunk_language = language
                 if language is None:
                     chunk_language, text = self.extract_language(text)
@@ -1482,7 +1570,9 @@ class Qwen3ASRModel(nn.Module):
         for (chunk_audio, offset_sec), chunk_end in chunk_iter:
             text, prompt_toks, gen_toks = self._generate_single_chunk(
                 chunk_audio,
-                max_tokens=max_tokens,
+                max_tokens=_chunk_token_budget(
+                    len(chunk_audio), self.sample_rate, max_tokens
+                ),
                 sampler=sampler,
                 logits_processors=logits_processors,
                 language=language,
@@ -1491,6 +1581,8 @@ class Qwen3ASRModel(nn.Module):
                 and len(chunks) == 1,  # Only show inner progress for single chunk
                 system_prompt=system_prompt,
             )
+
+            text = detect_and_fix_repetitions(text)
 
             # Detect per chunk; the request's language must stay unset so that
             # later chunks are auto-detected too.
@@ -1638,7 +1730,9 @@ class Qwen3ASRModel(nn.Module):
             for i, (token, _) in enumerate(
                 self.stream_generate(
                     chunk_audio,
-                    max_tokens=max_tokens,
+                    max_tokens=_chunk_token_budget(
+                        len(chunk_audio), self.sample_rate, max_tokens
+                    ),
                     sampler=sampler,
                     logits_processors=logits_processors,
                     language=language,
