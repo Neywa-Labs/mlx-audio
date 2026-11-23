@@ -1088,10 +1088,143 @@ def test_transcription_request_word_timestamps_accepted():
     from mlx_audio.server import TranscriptionRequest
 
     req = TranscriptionRequest(
-        model="test-model", word_timestamps=True, timestamp_granularities="word"
+        model="test-model", word_timestamps=True, timestamp_granularities=["word"]
     )
     assert req.word_timestamps is True
-    assert req.timestamp_granularities == "word"
+    assert req.timestamp_granularities == ["word"]
+
+
+@pytest.mark.parametrize(
+    "granularities, expected",
+    [
+        ("word", True),
+        ("word,segment", True),
+        ('["word"]', True),
+        ("segment", False),
+        (None, False),
+    ],
+)
+def test_stt_timestamp_granularities_word_enables_word_timestamps(
+    client, mock_model_provider, granularities, expected
+):
+    """timestamp_granularities=word must request word-level timestamps.
+
+    OpenAI clients request word granularity through this field; it must not be
+    silently dropped when the underlying model supports ``word_timestamps``.
+    """
+    captured_kwargs: dict = {}
+
+    def mock_generate(path, word_timestamps=False, **kwargs):
+        captured_kwargs["word_timestamps"] = word_timestamps
+        return {"text": "hello", "segments": [], "language": "en"}
+
+    mock_stt_model = MagicMock()
+    mock_stt_model.generate = mock_generate
+    mock_model_provider.load_model = MagicMock(return_value=mock_stt_model)
+
+    data = {"model": "test_stt_model", "response_format": "verbose_json"}
+    if granularities is not None:
+        data["timestamp_granularities"] = granularities
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data=data,
+    )
+
+    assert response.status_code == 200
+    assert captured_kwargs["word_timestamps"] is expected
+
+
+def _multipart_form_body(fields, file_part):
+    """Encode a multipart/form-data body, preserving repeated field names.
+
+    ``data`` mappings cannot express repeated form keys, and the official
+    openai client sends ``timestamp_granularities[]`` as one field per
+    granularity — raw bytes reproduce that exact wire shape.
+    """
+    boundary = "--------timestamp-granularities"
+    body = b"".join(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
+        ).encode()
+        for name, value in fields
+    )
+    filename, content, content_type = file_part
+    body += (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode()
+    return body + content + f"\r\n--{boundary}--\r\n".encode(), boundary
+
+
+@pytest.mark.parametrize(
+    ("granularity_fields", "expected_word_timestamps", "expected_granularities"),
+    [
+        ([("timestamp_granularities[]", "word")], True, ["word"]),
+        (
+            [
+                ("timestamp_granularities[]", "word"),
+                ("timestamp_granularities[]", "segment"),
+            ],
+            True,
+            ["word", "segment"],
+        ),
+        ([("timestamp_granularities[]", "segment")], False, ["segment"]),
+        (
+            [
+                ("timestamp_granularities[]", "segment"),
+                ("timestamp_granularities", "word"),
+            ],
+            True,
+            ["word", "segment"],
+        ),
+    ],
+)
+def test_stt_timestamp_granularities_brackets_wire_shape(
+    client,
+    mock_model_provider,
+    granularity_fields,
+    expected_word_timestamps,
+    expected_granularities,
+):
+    """``timestamp_granularities[]`` is the wire key the openai client sends.
+
+    A plain ``timestamp_granularities: str = Form(None)`` never binds the
+    bracketed key, so word-granularity requests from real OpenAI clients
+    were dropped. Both spellings merge; ``word`` in either enables
+    word-level timestamps.
+    """
+    captured_kwargs: dict = {}
+
+    def mock_generate(path, word_timestamps=False, **kwargs):
+        captured_kwargs["word_timestamps"] = word_timestamps
+        captured_kwargs.update(kwargs)
+        return {"text": "hello", "segments": [], "language": "en"}
+
+    mock_stt_model = MagicMock()
+    mock_stt_model.generate = mock_generate
+    mock_model_provider.load_model = MagicMock(return_value=mock_stt_model)
+
+    body, boundary = _multipart_form_body(
+        [
+            ("model", "test_stt_model"),
+            ("response_format", "verbose_json"),
+            *granularity_fields,
+        ],
+        ("test.mp3", _make_transcription_audio_buffer().getvalue(), "audio/mp3"),
+    )
+    response = client.post(
+        "/v1/audio/transcriptions",
+        content=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+
+    assert response.status_code == 200
+    assert captured_kwargs["word_timestamps"] is expected_word_timestamps
+    assert captured_kwargs["timestamp_granularities"] == expected_granularities
 
 
 def test_stt_word_timestamps_passed_to_generate(client, mock_model_provider):
