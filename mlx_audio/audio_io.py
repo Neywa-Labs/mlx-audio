@@ -687,13 +687,11 @@ def write(
 
     # Ensure data is numpy array (handle MLX arrays and other array-like types)
     if not isinstance(data, np.ndarray):
-        # Check for MLX array (has tolist but not __array__)
-        if hasattr(data, "tolist") and not hasattr(data, "__array__"):
-            data = np.array(data.tolist())
-        elif hasattr(data, "__array__"):
+        try:
             data = np.asarray(data)
-        else:
-            data = np.array(data)
+        except (TypeError, ValueError):
+            # Dtypes NumPy lacks, like MLX bfloat16, convert through Python.
+            data = np.array(data.tolist())
 
     # Convert to int16 for encoding
     if data.dtype in (np.float32, np.float64):
@@ -705,7 +703,19 @@ def write(
             data = data.astype(np.int16)
         else:
             data = (data * 32767).astype(np.int16)
+    elif np.issubdtype(data.dtype, np.floating):
+        # float16 and wider floats scale like float32/float64; truncating
+        # them straight to int16 writes near-silence.
+        data = (np.clip(data.astype(np.float64), -1.0, 1.0) * 32767).astype(np.int16)
     elif data.dtype != np.int16:
+        # Integer PCM is full-scale: shift into the int16 range instead of
+        # truncating, which wraps values outside +-32767.
+        dtype = data.dtype
+        data = data.astype(np.int64)
+        if np.issubdtype(dtype, np.unsignedinteger):
+            data -= np.int64(1) << (dtype.itemsize * 8 - 1)
+        shift = dtype.itemsize * 8 - 16
+        data = data >> shift if shift > 0 else data << -shift
         data = data.astype(np.int16)
 
     # Get number of channels
