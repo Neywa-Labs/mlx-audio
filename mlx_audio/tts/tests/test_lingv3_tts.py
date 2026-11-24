@@ -1,4 +1,5 @@
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ import mlx.nn as nn
 import numpy as np
 from mlx.utils import tree_flatten
 
+from mlx_audio.dsp import compute_fbank_kaldi
 from mlx_audio.stt.tests.test_ming_v3_asr import tiny_text_config
 from mlx_audio.tts.models.bailingmm.bailingmm import AudioVAE as SharedAudioVAE
 from mlx_audio.tts.models.bailingmm.bailingmm import Decoder, DiT
@@ -23,6 +25,8 @@ from mlx_audio.tts.models.lingv3_tts.prompt import (
     podcast_transcript,
     validate_podcast,
 )
+from mlx_audio.tts.models.lingv3_tts.speaker import SpeakerEncoder
+from mlx_audio.utils import resample_audio
 
 TOKENS = dict(
     audio_start_token_id=21,
@@ -284,7 +288,7 @@ class TestMingTinySeed(unittest.TestCase):
         return model
 
     class Encoder:
-        def __init__(self, path):
+        def __init__(self, path, resampling_method="default"):
             # MLX initializers advance the actual global stream, just as CAMPPlus
             # does before its parameters are replaced by checkpoint weights.
             self.layer = nn.Linear(2, 2)
@@ -480,6 +484,142 @@ class TestMingTinyPosterior(unittest.TestCase):
         np.testing.assert_allclose(
             np.array(latent), np.array(expected), rtol=1e-6, atol=1e-6
         )
+
+
+def _broadband(length):
+    n = np.arange(length, dtype=np.int64)
+    return (((20077 * n + 12345) % 65536 - 32768) // 2 / 32768).astype(np.float32)
+
+
+def _write_float_wav(path, samples, sample_rate):
+    # IEEE-float WAV (format tag 3): miniaudio reads the float32 samples back
+    # unquantized, while audio_write would clip them to int16.
+    data = np.asarray(samples, dtype="<f4").tobytes()
+    header = (
+        b"RIFF"
+        + struct.pack("<I", 36 + len(data))
+        + b"WAVEfmt "
+        + struct.pack("<IHHIIHH", 16, 3, 1, sample_rate, sample_rate * 4, 4, 32)
+        + b"data"
+        + struct.pack("<I", len(data))
+    )
+    Path(path).write_bytes(header + data)
+
+
+# torchaudio.functional.resample default (sinc_interp_hann) slices of
+# _broadband, generated with torchaudio 2.11.1.
+_TORCHAUDIO = {
+    (44100, 16000): {
+        0: [-0.082759038, -0.017633196, -0.1743595, 0.0754463]
+        + [0.076977268, -0.024094885, -0.092664286, -0.15198404],
+        8000: [0.027641429, 0.0053638467, -0.13656107, 0.10541631]
+        + [0.11163074, 0.0088024847, -0.059261736, -0.12216668],
+        15992: [0.014496404, -0.066874608, -0.10464117, 0.15661669]
+        + [0.032460749, 0.0040130122, -0.14639047, -0.0226514],
+    },
+    (24000, 44100): {
+        0: [-0.3124536, -0.26289582, 0.057013802, 0.33267578]
+        + [0.21019574, -0.2145849, -0.45767376, -0.23625268],
+        22050: [-0.10241915, 0.24699874, 0.1503104, -0.2861428]
+        + [-0.50669473, -0.32454976, -0.09407796, 0.056055073],
+        44092: [-0.29820392, -0.054025523, 0.094888031, 0.33238149]
+        + [0.51411211, 0.26781473, -0.15338641, -0.21401054],
+    },
+}
+
+
+class TestMingTinyReferenceResampling(unittest.TestCase):
+    """Clone references resample like torchaudio's default, not kaiser_best."""
+
+    @staticmethod
+    def _tone(sample_rate):
+        t = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        return 0.5 * np.sin(2 * np.pi * 440 * t) + 0.1 * np.sin(2 * np.pi * 7000 * t)
+
+    def test_reference_waveform_file_resamples_like_torchaudio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.wav"
+            _write_float_wav(path, _broadband(24000), 24000)
+            stub = SimpleNamespace(sample_rate=44100)
+            waveform = np.array(Model._reference_waveform(stub, path))
+        self.assertEqual(waveform.shape, (44100,))
+        for start, values in _TORCHAUDIO[24000, 44100].items():
+            np.testing.assert_allclose(waveform[start : start + 8], values, atol=1e-5)
+
+    def test_speaker_encoder_resamples_both_input_kinds_like_torchaudio(self):
+        encoder = object.__new__(SpeakerEncoder)
+        encoder.resampling_method = "sinc_interp_hann"
+        encoder.model = lambda features: mx.zeros((1, 192))
+        recorded = []
+
+        def recording_fbank(waveform, *args, **kwargs):
+            recorded.append(np.array(waveform))
+            return compute_fbank_kaldi(waveform, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reference.wav"
+            _write_float_wav(path, _broadband(44100), 44100)
+            with patch(
+                "mlx_audio.tts.models.lingv3_tts.speaker.compute_fbank_kaldi",
+                new=recording_fbank,
+            ):
+                encoder(path)
+                encoder(_broadband(44100), 44100)
+        self.assertEqual(len(recorded), 2)
+        for waveform in recorded:
+            self.assertEqual(waveform.shape, (16000,))
+            for start, values in _TORCHAUDIO[44100, 16000].items():
+                np.testing.assert_allclose(
+                    waveform[start : start + 8], values, atol=1e-5
+                )
+
+    def test_default_encoder_resamples_array_references_with_kaiser_best(self):
+        """Ming v3 Audio shares this encoder and keeps the default resampler."""
+        encoder = object.__new__(SpeakerEncoder)
+        encoder.resampling_method = "default"
+        encoder.model = lambda features: mx.zeros((1, 192))
+        recorded = []
+
+        def recording_fbank(waveform, *args, **kwargs):
+            recorded.append(np.array(waveform))
+            return compute_fbank_kaldi(waveform, *args, **kwargs)
+
+        with patch(
+            "mlx_audio.tts.models.lingv3_tts.speaker.compute_fbank_kaldi",
+            new=recording_fbank,
+        ):
+            encoder(self._tone(44100), 44100)
+        self.assertEqual(len(recorded), 1)
+        expected = resample_audio(self._tone(44100), 44100, 16000)
+        np.testing.assert_allclose(recorded[0], expected, atol=1e-6)
+
+    def test_speaker_embeddings_wires_sinc_resampling_into_the_encoder(self):
+        """Only Ming Tiny's own call site opts into torchaudio-like resampling."""
+
+        class SpkHead:
+            weight = SimpleNamespace(dtype=mx.float32)
+
+            def __call__(self, embedding):
+                return embedding
+
+        stub = SimpleNamespace(
+            _speaker_encoder=None,
+            config=SimpleNamespace(model_path="/tmp/x"),
+            sample_rate=44100,
+            spk_head=SpkHead(),
+        )
+        with patch(
+            "mlx_audio.tts.models.lingv3_tts.lingv3_tts.SpeakerEncoder"
+        ) as encoder_cls:
+            encoder_cls.return_value.return_value = mx.zeros((1, 192))
+            embedding = Model._speaker_embeddings(
+                stub, [np.zeros(44100, np.float32)], None
+            )
+        encoder_cls.assert_called_once()
+        self.assertEqual(
+            encoder_cls.call_args.kwargs["resampling_method"], "sinc_interp_hann"
+        )
+        self.assertEqual(embedding.shape, (1, 192))
 
 
 if __name__ == "__main__":
