@@ -280,22 +280,14 @@ class StreamingCausalConv1d:
         out = self.conv.conv(context[None, :, :]).squeeze(0)  # [n_out, C_out]
         n_out = out.shape[0]
 
-        # Save the last (kernel - stride) inputs as state. After this call the
-        # next kernel window will start exactly at position `n_out * stride`
-        # within the current context, leaving `context.shape[0] - n_out*stride`
-        # samples as "leftover", which must be (kernel - stride) by construction
-        # when the input stream has been packed with no gaps.
-        if self._keep > 0:
-            # Guard: if leftover < keep (early edge), save all.
-            leftover = context.shape[0] - n_out * self.stride
-            if leftover <= 0:
-                self._state = None
-            elif leftover >= self._keep:
-                self._state = context[-self._keep :]
-            else:
-                self._state = context[-leftover:]
-        else:
-            self._state = None
+        # Save the unconsumed trailing inputs as state. After this call the
+        # next kernel window starts at position `n_out * stride` within the
+        # current context, leaving `context.shape[0] - n_out*stride` leftover
+        # inputs. That leftover can exceed (kernel - stride) by up to stride-1
+        # when a chunk boundary is not stride-aligned; keeping only `keep`
+        # inputs would restart the conv phase-shifted and drop a frame.
+        leftover = context.shape[0] - n_out * self.stride
+        self._state = context[-leftover:] if leftover > 0 else None
 
         return out
 

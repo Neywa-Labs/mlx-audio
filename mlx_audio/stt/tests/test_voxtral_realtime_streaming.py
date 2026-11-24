@@ -202,6 +202,29 @@ class TestStreamingCausalConv1dParity(unittest.TestCase):
             with self.subTest(chunk=chunk):
                 self._run_case(kernel_size=6, stride=2, n_in=40, chunk=chunk)
 
+    def test_stride_2_misaligned_boundaries(self):
+        """Boundaries that leave more than kernel-stride trailing inputs must
+        still emit every batch output frame (leftover > keep regresses)."""
+        mx.random.seed(0)
+        conv = CausalConv1d(4, 6, kernel_size=3, stride=2)
+        _ = conv(mx.zeros((1, 3, 4)))
+
+        x_np = np.random.default_rng(1).standard_normal((40, 4)).astype(np.float32)
+        x = mx.array(x_np)
+        batch_out = conv(x[None, :, :]).squeeze(0)
+        mx.eval(batch_out)
+
+        # A boundary at 7 leaves 2 unconsumed inputs but keep is only 1.
+        for boundary in (7, 9, 3, 13):
+            with self.subTest(boundary=boundary):
+                sc = StreamingCausalConv1d(conv)
+                out = mx.concatenate([sc.step(x[:boundary]), sc.step(x[boundary:])])
+                mx.eval(out)
+                self.assertEqual(tuple(batch_out.shape), tuple(out.shape))
+                self.assertLess(
+                    float(np.abs(np.array(batch_out) - np.array(out)).max()), 1e-5
+                )
+
     def test_kernel_equals_stride(self):
         # Edge case: no state carried between calls.
         for chunk in (4, 8, 12):
