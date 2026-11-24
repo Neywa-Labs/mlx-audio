@@ -359,6 +359,10 @@ def normalize_loudness(
     target_loudness: float,
 ) -> np.ndarray:
     """Normalize audio to a target loudness in LUFS."""
+    if data.size == 0 or not np.isfinite(input_loudness):
+        # Silence measures -inf LUFS and NaN is not measurable: no finite gain
+        # reaches the target, and inf * 0 would produce NaN samples.
+        return data
     delta_loudness = target_loudness - input_loudness
     gain = np.power(10.0, delta_loudness / 20.0)
     output = gain * data
@@ -371,7 +375,11 @@ def normalize_loudness(
 
 def normalize_peak(data: np.ndarray, target_peak_db: float) -> np.ndarray:
     """Normalize audio to a target peak in dBFS."""
-    current_peak = np.max(np.abs(data))
+    current_peak = np.max(np.abs(data)) if data.size else 0.0
+    if not np.isfinite(current_peak) or current_peak == 0.0:
+        # Silent or empty input has no peak to scale from; leave it unchanged
+        # rather than turning it into NaN through a divide by zero.
+        return data
     gain = np.power(10.0, target_peak_db / 20.0) / current_peak
     output = gain * data
 
