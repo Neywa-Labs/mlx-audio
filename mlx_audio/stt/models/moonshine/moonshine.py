@@ -380,24 +380,31 @@ class Model(nn.Module):
         encoder_out = self.encoder(audio)
         mx.eval(encoder_out)
 
-        tokens = [self.config.decoder_start_token_id]
-        cache = None
-
-        for _ in range(max_tokens):
-            token_ids = mx.array([[tokens[-1]]], dtype=mx.int32)
+        def decode_step(token_ids, cache):
             hidden, cache = self.decoder(token_ids, encoder_out, cache=cache)
-            mx.eval(hidden)
-
             logits = self._get_logits(hidden[:, -1, :])
-
             if temperature > 0:
-                next_token = int(mx.random.categorical(logits / temperature))
+                next_token = mx.random.categorical(logits / temperature)
             else:
-                next_token = int(logits.argmax())
+                next_token = logits.argmax(axis=-1)
+            return next_token.astype(mx.int32).reshape(1, 1), cache
 
-            if next_token == self.config.eos_token_id:
+        tokens = [self.config.decoder_start_token_id]
+        if max_tokens > 0:
+            start_ids = mx.array([[tokens[-1]]], dtype=mx.int32)
+            next_token, cache = decode_step(start_ids, None)
+            mx.async_eval(next_token)
+
+        for step in range(max_tokens):
+            current_token = next_token
+            if step + 1 < max_tokens:
+                next_token, cache = decode_step(current_token, cache)
+                mx.async_eval(next_token)
+
+            token = current_token.item()
+            if token == self.config.eos_token_id:
                 break
-            tokens.append(next_token)
+            tokens.append(token)
 
         generated = tokens[1:]
         text = self._decode_tokens(generated)
