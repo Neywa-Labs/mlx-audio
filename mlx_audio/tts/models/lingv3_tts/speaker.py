@@ -7,6 +7,7 @@ import numpy as np
 
 from mlx_audio.codec.models.stepaudio2.speaker import StepAudio2CAMPPlus
 from mlx_audio.dsp import compute_fbank_kaldi
+from mlx_audio.resample import sinc_resample
 from mlx_audio.utils import load_audio, resample_audio
 
 # Ming Tiny, Ming 0.5B and StepAudio2 ship byte-identical source encoders
@@ -29,7 +30,8 @@ def resolve_speaker_weights(path):
 
 
 class SpeakerEncoder:
-    def __init__(self, path):
+    def __init__(self, path, resampling_method="default"):
+        self.resampling_method = resampling_method
         path = resolve_speaker_weights(path)
         self.model = StepAudio2CAMPPlus()
         self.model.load_weights(list(mx.load(str(path)).items()), strict=True)
@@ -38,13 +40,22 @@ class SpeakerEncoder:
 
     def __call__(self, audio, sample_rate=44100):
         if isinstance(audio, (str, Path)):
-            waveform = load_audio(str(audio), sample_rate=16000)
+            waveform = load_audio(
+                str(audio),
+                sample_rate=16000,
+                resampling_method=self.resampling_method,
+            )
         else:
             waveform = np.asarray(audio, dtype=np.float32)
             if waveform.ndim == 2:
                 waveform = waveform.mean(axis=-1)
             if sample_rate != 16000:
-                waveform = resample_audio(waveform, sample_rate, 16000)
+                if self.resampling_method == "sinc_interp_hann":
+                    waveform = np.array(
+                        sinc_resample(mx.array(waveform), sample_rate, 16000)
+                    )
+                else:
+                    waveform = resample_audio(waveform, sample_rate, 16000)
         waveform = mx.array(waveform, dtype=mx.float32)
         if (
             waveform.ndim != 1

@@ -94,7 +94,11 @@ class Model(nn.Module):
 
     def _reference_waveform(self, reference):
         waveform = (
-            load_audio(str(reference), sample_rate=self.sample_rate)
+            load_audio(
+                str(reference),
+                sample_rate=self.sample_rate,
+                resampling_method="sinc_interp_hann",
+            )
             if isinstance(reference, (str, Path))
             else mx.array(reference, dtype=mx.float32)
         )
@@ -120,6 +124,7 @@ class Model(nn.Module):
             if self._speaker_encoder is None:
                 self._speaker_encoder = SpeakerEncoder(
                     Path(self.config.model_path) / SPEAKER_SUBPATH,
+                    resampling_method="sinc_interp_hann",
                 )
             embedding = mx.concatenate(
                 [
