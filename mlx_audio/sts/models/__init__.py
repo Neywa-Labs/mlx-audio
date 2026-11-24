@@ -36,10 +36,13 @@ _LAZY_EXPORTS = {
     "MelRoFormerResult": "mel_roformer",
 }
 
+_SUBPACKAGES = frozenset(_LAZY_EXPORTS.values())
 __all__ = list(_LAZY_EXPORTS)
 
 
 def __getattr__(name):
+    if name in _SUBPACKAGES:
+        return importlib.import_module(f"{__name__}.{name}")
     if name not in _LAZY_EXPORTS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     module = importlib.import_module(f"{__name__}.{_LAZY_EXPORTS[name]}")
@@ -49,4 +52,4 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted(set(globals()) | set(__all__))
+    return sorted(set(globals()) | set(__all__) | _SUBPACKAGES)
