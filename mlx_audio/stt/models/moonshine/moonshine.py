@@ -386,7 +386,6 @@ class Model(nn.Module):
         for _ in range(max_tokens):
             token_ids = mx.array([[tokens[-1]]], dtype=mx.int32)
             hidden, cache = self.decoder(token_ids, encoder_out, cache=cache)
-            mx.eval(hidden)
 
             logits = self._get_logits(hidden[:, -1, :])
 
