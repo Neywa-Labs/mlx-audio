@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import mlx.core as mx
 import numpy as np
@@ -160,6 +161,37 @@ class TestDeepFilterNetRuntimeHelpers(unittest.TestCase):
 
         spec = mx.ones((1, cfg.freq_bins))
         self.assertTrue(mx.array_equal(runtime._erb(spec), mx.ones((1, cfg.nb_erb))))
+
+    def test_load_weights_folds_gru_biases_in_either_order(self):
+        # Weights are set in the order of a set of names, which changes with
+        # PYTHONHASHSEED.
+        from mlx_audio.sts.models.deepfilternet import weight_loader
+        from mlx_audio.sts.models.deepfilternet.config import DeepFilterNet3Config
+        from mlx_audio.sts.models.deepfilternet.network import DfNet
+
+        ih, hh = "enc.emb_gru.gru.bias_ih_l0", "enc.emb_gru.gru.bias_hh_l0"
+        get_weight_mapping = weight_loader.get_weight_mapping
+        for order in ((ih, hh), (hh, ih)):
+            with self.subTest(first=order[0]):
+                model = DfNet(DeepFilterNet3Config())
+                gru = model.enc.emb_gru.gru_layers[0]
+                h = gru.bhn.shape[0]
+                bias_ih = mx.arange(3 * h, dtype=mx.float32)
+                bias_hh = 10 * bias_ih
+
+                def ordered_mapping(pt_names, mlx_names):
+                    mapping = get_weight_mapping(pt_names, mlx_names)
+                    return {k: mapping[k] for k in order}
+
+                with mock.patch.object(
+                    weight_loader, "get_weight_mapping", ordered_mapping
+                ):
+                    weight_loader.load_weights(model, {ih: bias_ih, hh: bias_hh})
+
+                rz_sum = bias_ih[: 2 * h] + bias_hh[: 2 * h]
+                expected_b = mx.concatenate([rz_sum, bias_ih[2 * h :]])
+                self.assertTrue(mx.array_equal(gru.b, expected_b))
+                self.assertTrue(mx.array_equal(gru.bhn, bias_hh[2 * h :]))
 
 
 @unittest.skipUnless(
