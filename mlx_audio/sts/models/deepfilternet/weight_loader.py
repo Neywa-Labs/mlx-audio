@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Set
 
 import mlx.core as mx
+import mlx.nn as nn
 from mlx.utils import tree_flatten
 
 
@@ -31,6 +32,26 @@ def _apply_gru_mapping(name: str) -> str:
         f".gru_layers.{layer}.{comp}",
         name,
     )
+
+
+def _set_gru_bias(gru: nn.GRU, name: str, value: mx.array, pytorch_bias: bool):
+    """Keep the two contributions to MLX's b so either can be replaced later."""
+    if not pytorch_bias or (name == "bhn" and value.shape == gru.bhn.shape):
+        if name == "b":
+            # A native MLX b replaces the entire folded bias.
+            gru.pop("_pt_bias_parts", None)
+        setattr(gru, name, value)
+        return
+
+    bias_ih, hidden_rz = gru.get("_pt_bias_parts", (gru.b, None))
+    if name == "b":
+        bias_ih = value
+    else:
+        h = gru.bhn.shape[0]
+        hidden_rz = mx.pad(value[: 2 * h], (0, h))
+        gru.bhn = value[2 * h :]
+    gru._pt_bias_parts = (bias_ih, hidden_rz)
+    gru.b = bias_ih if hidden_rz is None else bias_ih + hidden_rz
 
 
 def _apply_stride_conv_index_offset(name: str) -> str:
@@ -120,7 +141,7 @@ def get_weight_mapping(pt_names: Set[str], mlx_names: Set[str]) -> Dict[str, str
     return mapping
 
 
-def set_weight(model, name: str, value: mx.array) -> bool:
+def set_weight(model, name: str, value: mx.array, *, pytorch_gru_bias=False) -> bool:
     """Set a weight in the model by dot-separated path.
 
     Handles dict-based modules with string keys and integer indices for lists.
@@ -129,6 +150,7 @@ def set_weight(model, name: str, value: mx.array) -> bool:
         model: The model object
         name: Dot-separated path (e.g., 'enc.erb_conv0.1.weight')
         value: The weight value
+        pytorch_gru_bias: Whether the source uses PyTorch GRU bias names.
 
     Returns:
         True if successful, False otherwise
@@ -170,31 +192,10 @@ def set_weight(model, name: str, value: mx.array) -> bool:
         # PyTorch: (8, 64, 32), MLX: (8, 64, 32)
         # No reshaping needed if groups match
 
+        if isinstance(obj, nn.GRU) and final_part in ("b", "bhn"):
+            _set_gru_bias(obj, final_part, value, pytorch_gru_bias)
+            return True
         if hasattr(obj, final_part):
-            # MLX nn.GRU uses bhn shape [H] (n-gate only), while PyTorch bias_hh is [3H].
-            # Preserve PyTorch behavior by storing r/z bias_hh for later fold into b.
-            if final_part == "bhn":
-                current = getattr(obj, final_part)
-                if (
-                    hasattr(current, "shape")
-                    and len(current.shape) == 1
-                    and len(value.shape) == 1
-                ):
-                    if current.shape[0] * 3 == value.shape[0]:
-                        h = current.shape[0]
-                        rz = value[: 2 * h]
-                        setattr(obj, "_pt_bhn_rz", rz)
-                        setattr(obj, final_part, value[2 * h :])
-                        setattr(obj, "_pt_bhn_folded", False)
-                        return True
-            if final_part == "b" and hasattr(obj, "_pt_bhn_rz"):
-                rz = getattr(obj, "_pt_bhn_rz")
-                h = value.shape[0] // 3
-                rz_pad = mx.concatenate([rz, mx.zeros((h,), dtype=value.dtype)], axis=0)
-                setattr(obj, final_part, value + rz_pad)
-                setattr(obj, "_pt_bhn_folded", True)
-                return True
-
             setattr(obj, final_part, value)
             return True
         elif isinstance(obj, dict) and final_part in obj:
@@ -234,34 +235,8 @@ def load_weights(model, weights: Dict[str, mx.array]) -> int:
     loaded = 0
     for pt_name, mlx_name in mapping.items():
         value = weights[pt_name]
-        if set_weight(model, mlx_name, value):
+        if set_weight(model, mlx_name, value, pytorch_gru_bias=".gru.bias_" in pt_name):
             loaded += 1
-
-    # Finalize GRU bias folding for cases where bias_ih loaded before bias_hh.
-    def _finalize_bias_fold(obj):
-        if (
-            hasattr(obj, "_pt_bhn_rz")
-            and hasattr(obj, "b")
-            and getattr(obj, "b") is not None
-        ):
-            if not getattr(obj, "_pt_bhn_folded", False):
-                rz = getattr(obj, "_pt_bhn_rz")
-                b = getattr(obj, "b")
-                h = b.shape[0] // 3
-                rz_pad = mx.concatenate([rz, mx.zeros((h,), dtype=b.dtype)], axis=0)
-                setattr(obj, "b", b + rz_pad)
-                setattr(obj, "_pt_bhn_folded", True)
-        for v in getattr(obj, "__dict__", {}).values():
-            if isinstance(v, list):
-                for it in v:
-                    _finalize_bias_fold(it)
-            elif isinstance(v, dict):
-                for it in v.values():
-                    _finalize_bias_fold(it)
-            elif hasattr(v, "__dict__"):
-                _finalize_bias_fold(v)
-
-    _finalize_bias_fold(model)
 
     # Load filterbanks - handle both wrapper and direct model cases
     if "erb_fb" in weights:
