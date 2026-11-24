@@ -193,6 +193,42 @@ class TestDeepFilterNetRuntimeHelpers(unittest.TestCase):
                 self.assertTrue(mx.array_equal(gru.b, expected_b))
                 self.assertTrue(mx.array_equal(gru.bhn, bias_hh[2 * h :]))
 
+    def test_load_weights_folds_partial_gru_bias_updates(self):
+        from mlx_audio.sts.models.deepfilternet.config import DeepFilterNet3Config
+        from mlx_audio.sts.models.deepfilternet.model import DeepFilterNetModel
+
+        model = DeepFilterNetModel(DeepFilterNet3Config())
+        gru = model.model.enc.emb_gru.gru_layers[0]
+        ih, hh = "enc.emb_gru.gru.bias_ih_l0", "enc.emb_gru.gru.bias_hh_l0"
+        h = gru.bhn.size
+        initial_b = gru.b
+        hidden = mx.arange(3 * h, dtype=initial_b.dtype)
+        inputs = mx.full_like(initial_b, 5)
+        erb_fb = mx.ones_like(model.erb_fb)
+
+        model.load_weights(
+            [(hh, hidden), ("unused.gru.bias_hh_l0", hidden), ("erb_fb", erb_fb)]
+        )
+        self.assertTrue(mx.array_equal(model.erb_fb, erb_fb))
+        self.assertTrue(mx.array_equal(gru.b[: 2 * h], (initial_b + hidden)[: 2 * h]))
+        self.assertTrue(mx.array_equal(gru.b[2 * h :], initial_b[2 * h :]))
+        self.assertTrue(mx.array_equal(gru.bhn, hidden[2 * h :]))
+
+        model.load_weights([(ih, inputs)])
+        self.assertTrue(mx.array_equal(gru.b[: 2 * h], (inputs + hidden)[: 2 * h]))
+        self.assertTrue(mx.array_equal(gru.b[2 * h :], inputs[2 * h :]))
+
+        # Replacing the hidden bias must discard its previous r/z contribution.
+        model.load_weights([(hh, -hidden)])
+        self.assertTrue(mx.array_equal(gru.b[: 2 * h], (inputs - hidden)[: 2 * h]))
+        self.assertTrue(mx.array_equal(gru.bhn, -hidden[2 * h :]))
+
+        # MLX's b already includes both contributions.
+        model.load_weights([("enc.emb_gru.gru_layers.0.b", initial_b)])
+        self.assertTrue(mx.array_equal(gru.b, initial_b))
+        model.load_weights([(ih, inputs)])
+        self.assertTrue(mx.array_equal(gru.b, inputs))
+
 
 @unittest.skipUnless(
     os.environ.get("MLX_AUDIO_RUN_STS_INTEGRATION") == "1",

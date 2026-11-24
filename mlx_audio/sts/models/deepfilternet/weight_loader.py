@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Set
 
 import mlx.core as mx
+import mlx.nn as nn
 from mlx.utils import tree_flatten
 
 
@@ -33,21 +34,24 @@ def _apply_gru_mapping(name: str) -> str:
     )
 
 
-def _fold_gru_biases(weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
-    """Fold the r/z part of PyTorch GRU bias_hh into bias_ih.
+def _set_gru_bias(gru: nn.GRU, name: str, value: mx.array, pytorch_bias: bool):
+    """Keep the two contributions to MLX's b so either can be replaced later."""
+    if not pytorch_bias or (name == "bhn" and value.shape == gru.bhn.shape):
+        if name == "b":
+            # A native MLX b replaces the entire folded bias.
+            gru.pop("_pt_bias_parts", None)
+        setattr(gru, name, value)
+        return
 
-    MLX nn.GRU keeps only the n-gate hidden bias (bhn).
-    """
-    folded = dict(weights)
-    for name, bias_hh in weights.items():
-        m = re.fullmatch(r"(.*\.gru\.)bias_hh(_l\d+)", name)
-        if not m:
-            continue
-        ih_name = f"{m.group(1)}bias_ih{m.group(2)}"
-        h = bias_hh.shape[0] // 3
-        folded[ih_name] = weights[ih_name] + mx.pad(bias_hh[: 2 * h], (0, h))
-        folded[name] = bias_hh[2 * h :]
-    return folded
+    bias_ih, hidden_rz = gru.get("_pt_bias_parts", (gru.b, None))
+    if name == "b":
+        bias_ih = value
+    else:
+        h = gru.bhn.shape[0]
+        hidden_rz = mx.pad(value[: 2 * h], (0, h))
+        gru.bhn = value[2 * h :]
+    gru._pt_bias_parts = (bias_ih, hidden_rz)
+    gru.b = bias_ih if hidden_rz is None else bias_ih + hidden_rz
 
 
 def _apply_stride_conv_index_offset(name: str) -> str:
@@ -137,7 +141,7 @@ def get_weight_mapping(pt_names: Set[str], mlx_names: Set[str]) -> Dict[str, str
     return mapping
 
 
-def set_weight(model, name: str, value: mx.array) -> bool:
+def set_weight(model, name: str, value: mx.array, *, pytorch_gru_bias=False) -> bool:
     """Set a weight in the model by dot-separated path.
 
     Handles dict-based modules with string keys and integer indices for lists.
@@ -146,6 +150,7 @@ def set_weight(model, name: str, value: mx.array) -> bool:
         model: The model object
         name: Dot-separated path (e.g., 'enc.erb_conv0.1.weight')
         value: The weight value
+        pytorch_gru_bias: Whether the source uses PyTorch GRU bias names.
 
     Returns:
         True if successful, False otherwise
@@ -187,6 +192,9 @@ def set_weight(model, name: str, value: mx.array) -> bool:
         # PyTorch: (8, 64, 32), MLX: (8, 64, 32)
         # No reshaping needed if groups match
 
+        if isinstance(obj, nn.GRU) and final_part in ("b", "bhn"):
+            _set_gru_bias(obj, final_part, value, pytorch_gru_bias)
+            return True
         if hasattr(obj, final_part):
             setattr(obj, final_part, value)
             return True
@@ -215,8 +223,6 @@ def load_weights(model, weights: Dict[str, mx.array]) -> int:
     Returns:
         Number of weights loaded
     """
-    weights = _fold_gru_biases(weights)
-
     # Get model parameter names
     param_tree = tree_flatten(model.parameters())
     mlx_names = {k for k, v in param_tree}
@@ -229,7 +235,7 @@ def load_weights(model, weights: Dict[str, mx.array]) -> int:
     loaded = 0
     for pt_name, mlx_name in mapping.items():
         value = weights[pt_name]
-        if set_weight(model, mlx_name, value):
+        if set_weight(model, mlx_name, value, pytorch_gru_bias=".gru.bias_" in pt_name):
             loaded += 1
 
     # Load filterbanks - handle both wrapper and direct model cases
