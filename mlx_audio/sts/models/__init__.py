@@ -1,63 +1,52 @@
 # Copyright (c) 2025 Prince Canuma and contributors (https://github.com/Blaizzy/mlx-audio)
 
-from .deepfilternet import (
-    DeepFilterNet2Config,
-    DeepFilterNet3Config,
-    DeepFilterNetConfig,
-    DeepFilterNetModel,
-    DeepFilterNetStreamer,
-    DeepFilterNetStreamingConfig,
-)
-from .lfm_audio import (
-    ChatState,
-    GenerationConfig,
-    LFM2AudioConfig,
-    LFM2AudioModel,
-    LFM2AudioProcessor,
-    LFMModality,
-)
-from .mel_roformer import MelRoFormer, MelRoFormerConfig, MelRoFormerResult
-from .moshi import MoshiConfig, MoshiSTSModel
-from .mossformer2_se import MossFormer2SE, MossFormer2SEConfig, MossFormer2SEModel
-from .sam_audio import (
-    Batch,
-    SAMAudio,
-    SAMAudioConfig,
-    SAMAudioProcessor,
-    SeparationResult,
-    save_audio,
-)
+import importlib
 
-__all__ = [
-    "SAMAudio",
-    "SAMAudioProcessor",
-    "SeparationResult",
-    "Batch",
-    "save_audio",
-    "SAMAudioConfig",
+_LAZY_EXPORTS = {
+    "SAMAudio": "sam_audio",
+    "SAMAudioProcessor": "sam_audio",
+    "SeparationResult": "sam_audio",
+    "Batch": "sam_audio",
+    "save_audio": "sam_audio",
+    "SAMAudioConfig": "sam_audio",
     # DeepFilterNet
-    "DeepFilterNetModel",
-    "DeepFilterNetConfig",
-    "DeepFilterNet2Config",
-    "DeepFilterNet3Config",
-    "DeepFilterNetStreamer",
-    "DeepFilterNetStreamingConfig",
+    "DeepFilterNetModel": "deepfilternet",
+    "DeepFilterNetConfig": "deepfilternet",
+    "DeepFilterNet2Config": "deepfilternet",
+    "DeepFilterNet3Config": "deepfilternet",
+    "DeepFilterNetStreamer": "deepfilternet",
+    "DeepFilterNetStreamingConfig": "deepfilternet",
     # MossFormer2 SE
-    "MossFormer2SE",
-    "MossFormer2SEConfig",
-    "MossFormer2SEModel",
+    "MossFormer2SE": "mossformer2_se",
+    "MossFormer2SEConfig": "mossformer2_se",
+    "MossFormer2SEModel": "mossformer2_se",
     # LFM2.5-Audio
-    "LFM2AudioModel",
-    "LFM2AudioProcessor",
-    "LFM2AudioConfig",
-    "LFMModality",
-    "ChatState",
-    "GenerationConfig",
+    "LFM2AudioModel": "lfm_audio",
+    "LFM2AudioProcessor": "lfm_audio",
+    "LFM2AudioConfig": "lfm_audio",
+    "LFMModality": "lfm_audio",
+    "ChatState": "lfm_audio",
+    "GenerationConfig": "lfm_audio",
     # Moshi
-    "MoshiConfig",
-    "MoshiSTSModel",
+    "MoshiConfig": "moshi",
+    "MoshiSTSModel": "moshi",
     # Mel-Band-RoFormer
-    "MelRoFormer",
-    "MelRoFormerConfig",
-    "MelRoFormerResult",
-]
+    "MelRoFormer": "mel_roformer",
+    "MelRoFormerConfig": "mel_roformer",
+    "MelRoFormerResult": "mel_roformer",
+}
+
+__all__ = list(_LAZY_EXPORTS)
+
+
+def __getattr__(name):
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = importlib.import_module(f"{__name__}.{_LAZY_EXPORTS[name]}")
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

@@ -59,6 +59,24 @@ print("OK")
     assert result.returncode == 0, f"STS lazy import failed: {result.stderr}"
 
 
+def test_sts_model_no_eager_imports():
+    """Importing one STS model should not import the other STS models."""
+    code = """
+import sys
+import mlx_audio.sts.models.deepfilternet
+for name in ["lfm_audio", "mel_roformer", "moshi", "mossformer2_se", "sam_audio"]:
+    assert f"mlx_audio.sts.models.{name}" not in sys.modules, f"{name} was eagerly imported"
+from mlx_audio.sts.models import DeepFilterNetModel
+print("OK")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"STS model lazy import failed: {result.stderr}"
+
+
 def test_codec_no_eager_imports():
     """Importing codec should not import miniaudio."""
     code = """
