@@ -47,7 +47,10 @@ class FlowLoss(nn.Module):
         ).transpose(0, 2, 1)
         times = get_epss_timesteps(steps, mx.float32)
         times = times - (mx.cos(math.pi / 2 * times) - 1 + times)
-        dtype = self.cfm.model.x_embedder.weight.dtype
+        embedder = self.cfm.model.x_embedder
+        dtype = (
+            embedder.scales if hasattr(embedder, "scales") else embedder.weight
+        ).dtype
         for index in range(steps):
             current = state.astype(dtype)
             cond = hidden.astype(dtype)
@@ -62,7 +65,7 @@ class FlowLoss(nn.Module):
                     current, time, cond, cfg, past, patch_size
                 )
                 prediction, unconditional = mx.split(outputs, 2, axis=0)
-                prediction = prediction + (prediction - unconditional) * cfg
+                prediction = unconditional + cfg * (prediction - unconditional)
             dt = times[index + 1] - times[index]
             state = state + dt * prediction.astype(mx.float32)
             # The upstream solver returns the final Euler value before the last noise draw.

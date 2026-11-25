@@ -150,7 +150,7 @@ class TestMingTinySampling(unittest.TestCase):
     def test_cfg_zero_one_and_two_follow_reference_euler(self):
         flow = FlowLoss(2, 4, dict(hidden_size=8, depth=1, num_heads=2))
         flow.cfm.model = ConstantDiT()
-        for cfg, delta in ((0, 0), (1, 1), (2, 3)):
+        for cfg, delta in ((0, 0), (1, 1), (2, 2)):
             mx.random.seed(42)
             initial = mx.random.normal((1, 2, 1)).transpose(0, 2, 1)
             mx.random.seed(42)
@@ -168,15 +168,131 @@ class TestMingTinySampling(unittest.TestCase):
             )
             self.assertEqual(actual.dtype, mx.float32)
 
+    def test_cfg_formula_matches_upstream_with_nonzero_unconditional(self):
+        class OffsetDiT(ConstantDiT):
+            def __call__(self, x, t, c, latent_history):
+                # cond (c=1) -> 3, uncond (c=0) -> 1
+                return mx.broadcast_to(
+                    1.0 + 2.0 * c.mean(axis=-1, keepdims=True), x.shape
+                )
+
+        flow = FlowLoss(2, 4, dict(hidden_size=8, depth=1, num_heads=2))
+        flow.cfm.model = OffsetDiT()
+        # uncond + cfg * (cond - uncond) = 1 + 2 * (3 - 1) = 5
+        mx.random.seed(42)
+        initial = mx.random.normal((1, 2, 1)).transpose(0, 2, 1)
+        mx.random.seed(42)
+        actual = flow.sample(
+            mx.ones((1, 1, 4)),
+            mx.zeros((1, 1, 2)),
+            cfg=2.0,
+            steps=1,
+            sigma=0.0,
+            temperature=0.0,
+        )
+        np.testing.assert_allclose(
+            np.array(actual), np.array(initial + 5.0), atol=1e-6
+        )
+
+    def test_quantized_flow_x_embedder_keeps_floating_point_activations(self):
+        seen_dtypes = []
+
+        class RecordingDiT(nn.Module):
+            forward_with_cfg = DiT.forward_with_cfg
+
+            def __init__(self):
+                super().__init__()
+                linear = nn.Linear(32, 32)
+                linear.weight = linear.weight.astype(mx.bfloat16)
+                self.x_embedder = nn.QuantizedLinear.from_linear(
+                    linear, group_size=32, bits=8
+                )
+
+            def __call__(self, x, t, c, latent_history):
+                seen_dtypes.append((x.dtype, c.dtype, latent_history.dtype))
+                return mx.zeros_like(x)
+
+        flow = FlowLoss(32, 4, dict(hidden_size=32, depth=1, num_heads=2))
+        flow.cfm.model = RecordingDiT()
+        self.assertEqual(flow.cfm.model.x_embedder.weight.dtype, mx.uint32)
+        self.assertEqual(flow.cfm.model.x_embedder.scales.dtype, mx.bfloat16)
+        actual = flow.sample(
+            mx.ones((1, 1, 4)),
+            mx.zeros((1, 1, 32)),
+            cfg=1.0,
+            steps=1,
+            sigma=0.0,
+            temperature=0.0,
+        )
+        self.assertEqual(seen_dtypes, [(mx.bfloat16, mx.bfloat16, mx.bfloat16)])
+        self.assertEqual(actual.dtype, mx.float32)
+
     def test_bfloat16_vae_upsampling_matches_half_pixel_interpolation(self):
         decoder = SimpleNamespace(patch_size=3)
         x = mx.array([[[1, 3, 9]]], dtype=mx.bfloat16)
         actual = Decoder._linear_upsample_1d(decoder, x)
+        self.assertEqual(actual.dtype, mx.bfloat16)
         position = (np.arange(9) + 0.5) / 3 - 0.5
         expected = np.interp(position, np.arange(3), [1, 3, 9])[None, None]
-        np.testing.assert_allclose(np.array(actual), expected, atol=1e-6)
+        expected_bf16 = np.array(
+            mx.array(expected, dtype=mx.bfloat16).astype(mx.float32)
+        )
+        np.testing.assert_allclose(
+            np.array(actual.astype(mx.float32)), expected_bf16, atol=1e-6
+        )
         singleton = Decoder._linear_upsample_1d(decoder, x[..., :1])
-        np.testing.assert_array_equal(np.array(singleton), [[[1, 1, 1]]])
+        self.assertEqual(singleton.dtype, mx.bfloat16)
+        np.testing.assert_array_equal(
+            np.array(singleton.astype(mx.float32)), [[[1, 1, 1]]]
+        )
+
+        x_f32 = mx.array([[[1, 3, 9]]], dtype=mx.float32)
+        actual_f32 = Decoder._linear_upsample_1d(decoder, x_f32)
+        self.assertEqual(actual_f32.dtype, mx.float32)
+        np.testing.assert_allclose(np.array(actual_f32), expected, atol=1e-6)
+
+    def test_vae_decoder_preserves_bfloat16_activations_after_upsampling(self):
+        seen_dtypes = []
+        backbone = dict(
+            model_type="qwen2",
+            rms_norm_eps=1e-6,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            vocab_size=32,
+        )
+        decoder = Decoder(
+            decoder_args=backbone, output_dim=4, latent_dim=2, patch_size=2
+        )
+        decoder.set_dtype(mx.bfloat16)
+        orig_decoder = decoder.decoder
+
+        def record_decoder(dummy, cache=None, input_embeddings=None):
+            seen_dtypes.append(input_embeddings.dtype)
+            return orig_decoder(dummy, cache=cache, input_embeddings=input_embeddings)
+
+        record_decoder.layers = orig_decoder.layers
+        decoder.decoder = record_decoder
+        latents = mx.ones((1, 2, 2), dtype=mx.bfloat16)
+        waveform, _, _ = decoder.low_level_reconstruct(latents, use_cache=False)
+        self.assertEqual(seen_dtypes, [mx.bfloat16])
+        self.assertEqual(waveform.dtype, mx.float32)
+
+        seen_dtypes.clear()
+        _, state, kv = decoder.low_level_reconstruct(
+            latents[:, :1, :], use_cache=True, last_chunk=False
+        )
+        waveform_stream, _, _ = decoder.low_level_reconstruct(
+            latents[:, 1:, :],
+            past_key_values=kv,
+            use_cache=True,
+            stream_state=state,
+            last_chunk=True,
+        )
+        self.assertEqual(seen_dtypes, [mx.bfloat16])
+        self.assertEqual(waveform_stream.dtype, mx.float32)
 
     def test_freeform_uses_supplied_embedding_and_rejects_extra_speakers(self):
         model = Model.__new__(Model)
