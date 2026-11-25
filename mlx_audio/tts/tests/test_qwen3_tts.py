@@ -5,7 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
+from mlx.utils import tree_flatten
 
 from mlx_audio.tts.models.qwen3_tts.config import Qwen3TTSTokenizerDecoderConfig
 from mlx_audio.tts.models.qwen3_tts.qwen3_tts import Model, mel_spectrogram
@@ -18,6 +20,7 @@ from mlx_audio.tts.models.qwen3_tts.speech_tokenizer import (
     DecoderTransformer,
     Qwen3TTSSpeechTokenizer,
 )
+from mlx_audio.utils import apply_quantization
 
 
 def _top_p_keep_mask(scores, top_p):
@@ -1375,6 +1378,104 @@ class TestQwen3TTSDecodeValidLength(unittest.TestCase):
                 audio = model._decode_chunk(codes)
 
                 self.assertEqual(audio.shape[0], 4 * 4)
+
+
+class TestQwen3TTSQuantizedCheckpointLoad(unittest.TestCase):
+    """8-bit exports may store the talker's text / codec embeddings quantized."""
+
+    QUANTIZATION = {"group_size": 32, "bits": 8}
+
+    @staticmethod
+    def make_model():
+        from mlx_audio.tts.models.qwen3_tts.config import ModelConfig
+
+        layer = dict(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=32,
+            rms_norm_eps=1e-6,
+            rope_theta=10000.0,
+        )
+        talker = dict(
+            layer,
+            vocab_size=64,
+            num_code_groups=3,
+            text_hidden_size=64,
+            text_vocab_size=96,
+            code_predictor_config=dict(layer, vocab_size=64, num_code_groups=3),
+        )
+        return Model(
+            ModelConfig.from_dict(
+                dict(
+                    model_type="qwen3_tts", tts_model_type="base", talker_config=talker
+                )
+            )
+        )
+
+    def export(self, predicate):
+        mx.random.seed(0)
+        model = self.make_model()
+        nn.quantize(
+            model,
+            class_predicate=lambda p, m: hasattr(m, "to_quantized") and predicate(p, m),
+            **self.QUANTIZATION,
+        )
+        return dict(tree_flatten(model.parameters()))
+
+    def load(self, weights):
+        # Same steps as mlx_audio.utils.load_model.
+        model = self.make_model()
+        weights = model.sanitize(weights)
+        config = {"quantization": self.QUANTIZATION}
+        apply_quantization(model, config, weights, model.model_quant_predicate)
+        model.load_weights(list(weights.items()), strict=True)
+        return model
+
+    def assert_loaded(self, model, weights):
+        loaded = dict(tree_flatten(model.parameters()))
+        self.assertEqual(loaded.keys(), weights.keys())
+        for key, value in weights.items():
+            self.assertTrue(mx.array_equal(loaded[key], value), key)
+
+    def test_loads_export_with_quantized_embeddings(self):
+        weights = self.export(lambda p, m: True)
+        self.assertIn("talker.model.text_embedding.scales", weights)
+        self.assertIn("talker.model.codec_embedding.scales", weights)
+        self.assertIn("talker.code_predictor.model.codec_embedding.0.scales", weights)
+
+        model = self.load(weights)
+
+        talker = model.talker.model
+        self.assertIsInstance(talker.text_embedding, nn.QuantizedEmbedding)
+        self.assertIsInstance(talker.codec_embedding, nn.QuantizedEmbedding)
+        for embedding in model.talker.code_predictor.model.codec_embedding:
+            self.assertIsInstance(embedding, nn.QuantizedEmbedding)
+        self.assert_loaded(model, weights)
+
+    def test_loads_export_with_float_embeddings_unchanged(self):
+        model = self.make_model()
+        weights = self.export(model.model_quant_predicate)
+        self.assertNotIn("talker.model.text_embedding.scales", weights)
+
+        model = self.load(weights)
+
+        talker = model.talker.model
+        self.assertIs(type(talker.text_embedding), nn.Embedding)
+        self.assertIs(type(talker.codec_embedding), nn.Embedding)
+        self.assertIsInstance(talker.layers[0].self_attn.q_proj, nn.QuantizedLinear)
+        self.assert_loaded(model, weights)
+
+    def test_load_predicate_keeps_audio_modules_float(self):
+        model = self.make_model()
+        linear = nn.Linear(64, 64)
+        self.assertTrue(
+            model.model_load_quant_predicate("talker.model.text_embedding", linear)
+        )
+        for path in ("speech_tokenizer.decoder.proj", "speaker_encoder.fc"):
+            self.assertFalse(model.model_load_quant_predicate(path, linear))
 
 
 if __name__ == "__main__":
