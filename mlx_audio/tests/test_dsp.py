@@ -511,3 +511,51 @@ def test_sinc_resample_memory_follows_the_signal():
     mx.eval(sinc_resample(x, 44099, 44100))
     # torchaudio's dense kernel for 44099 -> 44100 alone takes 7.8 GB.
     assert mx.get_peak_memory() - before < 32 * 1024 * 1024
+
+
+def test_normalize_loudness_silence_stays_finite():
+    """-inf LUFS input (silence) must not turn into an inf gain * 0 = NaN."""
+    from mlx_audio.dsp import integrated_loudness, normalize_loudness
+
+    silence = np.zeros(24000, dtype=np.float64)
+    measured = integrated_loudness(silence, 24000)
+    assert not np.isfinite(measured)
+
+    normalized = normalize_loudness(silence, measured, -18.0)
+    assert np.isfinite(normalized).all()
+    np.testing.assert_array_equal(normalized, silence)
+
+
+def test_normalize_loudness_nan_input_loudness_stays_finite():
+    from mlx_audio.dsp import normalize_loudness
+
+    data = np.linspace(-0.5, 0.5, 32, dtype=np.float64)
+    normalized = normalize_loudness(data, float("nan"), -18.0)
+    assert np.isfinite(normalized).all()
+    np.testing.assert_array_equal(normalized, data)
+
+
+def test_normalize_peak_silence_stays_finite():
+    """A zero peak divides by zero and yields NaN without a guard."""
+    from mlx_audio.dsp import normalize_peak
+
+    silence = np.zeros(128, dtype=np.float64)
+    normalized = normalize_peak(silence, -1.0)
+    assert np.isfinite(normalized).all()
+    np.testing.assert_array_equal(normalized, silence)
+
+
+def test_normalize_peak_empty_input():
+    from mlx_audio.dsp import normalize_peak
+
+    empty = np.zeros(0, dtype=np.float64)
+    normalized = normalize_peak(empty, -1.0)
+    assert normalized.size == 0
+
+
+def test_normalize_loudness_empty_input():
+    from mlx_audio.dsp import normalize_loudness
+
+    empty = np.zeros(0, dtype=np.float64)
+    normalized = normalize_loudness(empty, -30.0, -18.0)
+    assert normalized.size == 0
