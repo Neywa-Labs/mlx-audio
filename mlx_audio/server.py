@@ -779,6 +779,9 @@ class TTSExecutionAdapter(BaseModelExecutionAdapter):
         if not audio_chunks:
             raise HTTPException(status_code=400, detail="No audio generated")
 
+        for i, chunk in enumerate(audio_chunks):
+            if getattr(chunk, "dtype", None) == mx.bfloat16:
+                audio_chunks[i] = chunk.astype(mx.float32)
         concatenated_audio = np.concatenate(audio_chunks)
         self._emit_audio(request, speech_request, concatenated_audio, sample_rate)
         request.emit_done()

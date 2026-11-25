@@ -1158,3 +1158,47 @@ class TestAudioIODuration:
         assert load_audio(str(wav_path), sample_rate=16000, duration=0.5).shape == (
             8000,
         )
+
+
+class TestAudioIOWriteDtypes:
+    """write() must convert every audio dtype, not only float32/float64."""
+
+    def test_write_float16_scales_like_float32(self, tmp_path):
+        """float16 samples in [-1, 1] were truncated to int16 zeros (silence)."""
+        data = np.array([0.5, -0.5, 0.25, -0.25, 1.0, -1.0], dtype=np.float16)
+        path = tmp_path / "f16.wav"
+        write(path, data, 16000, format="wav")
+
+        actual, rate = read(path, dtype="int16")
+        assert rate == 16000
+        expected = (np.clip(data.astype(np.float64), -1.0, 1.0) * 32767).astype(
+            np.int16
+        )
+        np.testing.assert_array_equal(actual, expected)
+        assert np.any(actual != 0), "float16 input was written as silence"
+
+    def test_write_int32_full_scale(self, tmp_path):
+        """int32 PCM is full-scale: shift into int16 instead of wrapping."""
+        data = np.array(
+            [0x40000000, -0x40000000, 0x7FFFFFFF, -0x80000000], dtype=np.int32
+        )
+        path = tmp_path / "i32.wav"
+        write(path, data, 16000, format="wav")
+
+        actual, _ = read(path, dtype="int16")
+        np.testing.assert_array_equal(
+            actual, np.array([16384, -16384, 32767, -32768], dtype=np.int16)
+        )
+
+    def test_write_mlx_bfloat16(self, tmp_path):
+        """MLX bfloat16 has no NumPy dtype; write must not raise."""
+        import mlx.core as mx
+
+        data = mx.array([0.5, -0.5, 0.25, -0.25], dtype=mx.bfloat16)
+        path = tmp_path / "bf16.wav"
+        write(path, data, 16000, format="wav")
+
+        actual, _ = read(path, dtype="int16")
+        np.testing.assert_array_equal(
+            actual, np.array([16383, -16383, 8191, -8191], dtype=np.int16)
+        )

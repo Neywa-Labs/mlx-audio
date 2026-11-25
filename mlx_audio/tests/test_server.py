@@ -145,6 +145,38 @@ def test_tts_speech(client, mock_model_provider):
         pytest.fail(f"Failed to read or validate MP3 content: {e}")
 
 
+def test_tts_speech_nonstream_bfloat16_audio(client, mock_model_provider):
+    """A model emitting MLX bfloat16 audio must survive the non-stream path.
+
+    np.concatenate cannot express bfloat16, so the endpoint casts chunks to
+    float32 before combining them (the same promotion write() performs).
+    """
+    sample_rate = 16000
+    t = np.arange(1600) / sample_rate
+    audio = mx.array(0.5 * np.sin(2 * np.pi * 440 * t), dtype=mx.bfloat16)
+
+    def generate(input_text: str, **kwargs):
+        yield MockAudioResult(audio, sample_rate)
+
+    mock_tts_model = MagicMock()
+    mock_tts_model.generate = MagicMock(side_effect=generate)
+    mock_model_provider.load_model = MagicMock(return_value=mock_tts_model)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "test_tts_model",
+            "input": "Hello world",
+            "response_format": "wav",
+        },
+    )
+
+    assert response.status_code == 200
+    audio_data, rate = audio_read(io.BytesIO(response.content))
+    assert rate == sample_rate
+    assert np.abs(audio_data).max() > 0.1
+
+
 def test_tts_speech_releases_buffer_cache_after_request(
     client, mock_model_provider, monkeypatch
 ):

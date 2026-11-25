@@ -405,6 +405,8 @@ def generate_audio(
                 audio_list.append(audio)
             elif not stream:
                 file_name = f"{file_prefix}_{i:03d}.{audio_format}"
+                if getattr(audio, "dtype", None) == mx.bfloat16:
+                    audio = audio.astype(mx.float32)
                 audio_write(
                     file_name,
                     np.array(audio),
