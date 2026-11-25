@@ -372,30 +372,31 @@ class KokoroPipeline:
         if not tokens or len(pred_dur) < 3:
             # We expect at least 3: <bos>, token, <eos>
             return
+        durations = pred_dur.tolist()
         # We track 2 counts, measured in half-frames: (left, right)
         # This way we can cut space characters in half
         # TODO: Is -3 an appropriate offset?
-        left = right = 2 * max(0, pred_dur[0].item() - 3)
+        left = right = 2 * max(0, durations[0] - 3)
         # Updates:
         # left = right + (2 * token_dur) + space_dur
         # right = left + space_dur
         i = 1
         for t in tokens:
-            if i >= len(pred_dur) - 1:
+            if i >= len(durations) - 1:
                 break
             if not t.phonemes:
                 if t.whitespace:
                     i += 1
-                    left = right + pred_dur[i].item()
-                    right = left + pred_dur[i].item()
+                    left = right + durations[i]
+                    right = left + durations[i]
                     i += 1
                 continue
             j = i + len(t.phonemes)
-            if j >= len(pred_dur):
+            if j >= len(durations):
                 break
             t.start_ts = left / MAGIC_DIVISOR
-            token_dur = pred_dur[i:j].sum().item()
-            space_dur = pred_dur[j].item() if t.whitespace else 0
+            token_dur = sum(durations[i:j])
+            space_dur = durations[j] if t.whitespace else 0
             left = right + (2 * token_dur) + space_dur
             t.end_ts = left / MAGIC_DIVISOR
             right = left + space_dur
