@@ -2,6 +2,13 @@
 
 This file acknowledges the original authors and contributors of models ported to mlx-audio.
 
+## kale-tts-1 (Text-to-Speech)
+
+- **Original**: [KaleComputer/kale-tts-1-nano](https://huggingface.co/KaleComputer/kale-tts-1-nano), [kale-tts-1-tiny](https://huggingface.co/KaleComputer/kale-tts-1-tiny), [kale-tts-1-base](https://huggingface.co/KaleComputer/kale-tts-1-base)
+- **Copyright**: Kale; source-filter decoder head after paradee (Apache-2.0); Kokoro-82M (Apache-2.0, hexgrad); Ettin-encoder-17m (MIT, jhu-clsp)
+- **License**: Apache-2.0 (weights and front end; Ettin-encoder-17m MIT)
+- **MLX Port**: Kale
+
 ## Fish Audio Drama 3 (Text-to-Speech)
 
 - **Original**: [fishaudio/drama-3](https://huggingface.co/fishaudio/drama-3)

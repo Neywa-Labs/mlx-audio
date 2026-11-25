@@ -139,6 +139,7 @@ for result in model.generate(
 | Model | Description | Languages | Repo |
 |-------|-------------|-----------|------|
 | **Kokoro** | Fast, high-quality multilingual TTS | EN, JA, ZH, FR, ES, IT, PT, HI | [bf16](https://huggingface.co/mlx-community/Kokoro-82M-bf16), [8bit](https://huggingface.co/mlx-community/Kokoro-82M-8bit), [6bit](https://huggingface.co/mlx-community/Kokoro-82M-6bit), [4bit](https://huggingface.co/mlx-community/Kokoro-82M-4bit) |
+| [**kale-tts-1**](docs/models/tts/kale-tts.md) | Small English TTS with 10 designed voices (nano 7.5M, tiny 45.7M, base 82M) | EN | [nano](https://huggingface.co/KaleComputer/kale-tts-1-nano), [tiny](https://huggingface.co/KaleComputer/kale-tts-1-tiny), [base](https://huggingface.co/KaleComputer/kale-tts-1-base) |
 | **KittenTTS** | Compact KittenTTS 0.8 models for edge-friendly TTS | EN | [nano](https://huggingface.co/mlx-community/kitten-tts-nano-0.8), [micro](https://huggingface.co/mlx-community/kitten-tts-micro-0.8), [mini](https://huggingface.co/mlx-community/kitten-tts-mini-0.8), [collection](https://huggingface.co/collections/mlx-community/kittentts) |
 | **Qwen3-TTS** | Alibaba's multilingual TTS with voice design | ZH, EN, JA, KO, + more | [mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16) |
 | [**ZONOS3-Mini**](mlx_audio/tts/models/zonos3/README.md) | Multilingual TTS with 27 voices, voice cloning, and streaming at 44.1 kHz | Multilingual | [mlx-community/ZONOS3-Mini](https://huggingface.co/mlx-community/ZONOS3-Mini) |
