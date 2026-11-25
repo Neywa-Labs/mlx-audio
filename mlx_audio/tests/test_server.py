@@ -478,6 +478,157 @@ def test_stt_transcriptions_default_format_preserves_ndjson(
         _json.loads(line)
 
 
+_TIMED_PAYLOAD = {
+    "text": "Hello world.",
+    "language": "en",
+    "segments": [
+        {"id": 0, "text": "Hello", "start": 0.0, "end": 0.5},
+        {"id": 1, "text": " world.", "start": 0.5, "end": 1.0},
+    ],
+}
+
+
+def test_stt_transcriptions_response_format_srt(client, mock_model_provider):
+    """response_format=srt renders timed segments as SubRip cues."""
+    response = _post_transcription(
+        client, mock_model_provider, _TIMED_PAYLOAD, response_format="srt"
+    )
+    assert response.status_code == 200
+    assert "x-subrip" in response.headers["content-type"]
+    assert response.text == (
+        "1\n00:00:00,000 --> 00:00:00,500\nHello\n\n"
+        "2\n00:00:00,500 --> 00:00:01,000\n world.\n\n"
+    )
+
+
+def test_stt_transcriptions_response_format_vtt(client, mock_model_provider):
+    """response_format=vtt renders timed segments as WebVTT cues."""
+    response = _post_transcription(
+        client, mock_model_provider, _TIMED_PAYLOAD, response_format="vtt"
+    )
+    assert response.status_code == 200
+    assert "text/vtt" in response.headers["content-type"]
+    assert response.text == (
+        "WEBVTT\n\n"
+        "1\n00:00:00.000 --> 00:00:00.500\nHello\n\n"
+        "2\n00:00:00.500 --> 00:00:01.000\n world.\n\n"
+    )
+
+
+def test_stt_transcriptions_subtitles_require_timestamps(client, mock_model_provider):
+    """An untimed transcript cannot become a subtitle file: 400, not empty cues."""
+    response = _post_transcription(
+        client, mock_model_provider, {"text": "hi"}, response_format="srt"
+    )
+    assert response.status_code == 400
+
+
+_SENTENCES_PAYLOAD = {
+    "text": "Hello world.",
+    "sentences": [
+        {"text": "Hello", "start": 0.0, "end": 0.5},
+        {"text": " world.", "start": 0.5, "end": 1.0},
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("response_format", "expected"),
+    [
+        (
+            "srt",
+            "1\n00:00:00,000 --> 00:00:00,500\nHello\n\n"
+            "2\n00:00:00,500 --> 00:00:01,000\n world.\n\n",
+        ),
+        (
+            "vtt",
+            "WEBVTT\n\n"
+            "1\n00:00:00.000 --> 00:00:00.500\nHello\n\n"
+            "2\n00:00:00.500 --> 00:00:01.000\n world.\n\n",
+        ),
+    ],
+)
+def test_stt_transcriptions_subtitles_from_sentences(
+    client, mock_model_provider, response_format, expected
+):
+    """Parakeet-style `sentences` payloads must reach the subtitle renderer.
+
+    The buffered collect loop used to require `segments`/`language`, so a
+    `{"text", "sentences"}` result was reported as an untimed transcript.
+    """
+    response = _post_transcription(
+        client,
+        mock_model_provider,
+        _SENTENCES_PAYLOAD,
+        response_format=response_format,
+    )
+    assert response.status_code == 200
+    assert response.text == expected
+
+
+def test_stt_transcriptions_verbose_json_includes_sentences(
+    client, mock_model_provider
+):
+    """verbose_json keeps a `sentences` payload instead of dropping the timing."""
+    response = _post_transcription(
+        client,
+        mock_model_provider,
+        _SENTENCES_PAYLOAD,
+        response_format="verbose_json",
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["text"] == "Hello world."
+    assert body["sentences"] == _SENTENCES_PAYLOAD["sentences"]
+
+
+def test_stt_transcriptions_text_with_sentences_payload(client, mock_model_provider):
+    """response_format=text still returns the transcript for `sentences`."""
+    response = _post_transcription(
+        client,
+        mock_model_provider,
+        _SENTENCES_PAYLOAD,
+        response_format="text",
+    )
+    assert response.status_code == 200
+    assert response.text == "Hello world."
+
+
+def test_stt_transcriptions_rejects_unknown_response_format(
+    client, mock_model_provider
+):
+    """Formats this endpoint cannot produce must fail fast, before inference."""
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("test.mp3", _make_transcription_audio_buffer(), "audio/mp3")},
+        data={"model": "test_stt_model", "response_format": "yaml"},
+    )
+    assert response.status_code == 400
+    mock_model_provider.load_model.assert_not_called()
+
+
+@pytest.mark.parametrize("response_format", ["aac", "yaml"])
+def test_tts_speech_rejects_unsupported_response_format(
+    client, mock_model_provider, response_format
+):
+    """Formats the encoder cannot write must fail before the stream opens."""
+    mock_tts_model = MagicMock()
+    mock_tts_model.generate = MagicMock(wraps=sync_mock_audio_stream_generator)
+    mock_model_provider.load_model = MagicMock(return_value=mock_tts_model)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "test_tts_model",
+            "input": "hi",
+            "response_format": response_format,
+        },
+    )
+    assert response.status_code == 400
+    assert "response_format" in response.json()["detail"]
+    mock_model_provider.load_model.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # WebSocket realtime streaming tests
 # ---------------------------------------------------------------------------

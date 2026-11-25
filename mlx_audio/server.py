@@ -59,6 +59,7 @@ from mlx_audio.server_inference import (
     InferenceRequest,
     InferenceResultChunk,
 )
+from mlx_audio.stt.generate import format_timestamp, format_vtt_timestamp
 from mlx_audio.stt.streaming import StreamingSession
 from mlx_audio.tts.continuous import TTSBatchItem, TTSBatchOptions
 from mlx_audio.utils import load_model, resample_audio
@@ -165,6 +166,56 @@ app.router.lifespan_context = app_lifespan
 
 
 _MAX_REQUEST_SEED = 2**32 - 1
+
+# Formats audio_io.write can encode. Anything else must be rejected up front:
+# these routes return streaming responses, so an unsupported value would
+# otherwise surface as a 200 OK whose body fails mid-stream.
+_SPEECH_RESPONSE_FORMATS = {
+    "wav",
+    "mp3",
+    "flac",
+    "ogg",
+    "opus",
+    "vorbis",
+    "webm",
+    "pcm",
+    "raw",
+}
+_TRANSCRIPTION_RESPONSE_FORMATS = {
+    "ndjson",
+    "text",
+    "json",
+    "verbose_json",
+    "srt",
+    "vtt",
+}
+
+
+def _subtitle_cues(payload: dict) -> list[dict]:
+    """Timed cues from a transcription payload.
+
+    STT models emit either a ``segments`` list (Whisper-style) or a
+    ``sentences`` list (Parakeet-style); both carry start/end/text after
+    ``sanitize_for_json`` flattens the result object to dicts.
+    """
+    timed = payload.get("sentences") or payload.get("segments") or []
+    return [
+        {"start": s["start"], "end": s["end"], "text": s.get("text", "")}
+        for s in timed
+        if s.get("start") is not None and s.get("end") is not None
+    ]
+
+
+def _render_subtitles(cues: list[dict], format: str) -> str:
+    """Render cues as SRT or WebVTT with the CLI writers' timestamp format."""
+    if format == "vtt":
+        header, to_ts = "WEBVTT\n\n", format_vtt_timestamp
+    else:
+        header, to_ts = "", format_timestamp
+    return header + "".join(
+        f"{i}\n{to_ts(cue['start'])} --> {to_ts(cue['end'])}\n{cue['text']}\n\n"
+        for i, cue in enumerate(cues, 1)
+    )
 
 
 # Request schemas for OpenAI-compatible endpoints
@@ -1060,6 +1111,16 @@ async def remove_model(model_name: str):
 @app.post("/v1/audio/speech")
 async def tts_speech(payload: SpeechRequest, request: Request):
     """Generate speech audio following the OpenAI text-to-speech API."""
+    response_format = (payload.response_format or "mp3").lower()
+    if response_format not in _SPEECH_RESPONSE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported response_format: {payload.response_format!r}. "
+                f"Supported formats: {sorted(_SPEECH_RESPONSE_FORMATS)}"
+            ),
+        )
+
     if payload.ref_audio and isinstance(payload.ref_audio, str):
         if not os.path.exists(payload.ref_audio):
             raise HTTPException(
@@ -1078,9 +1139,9 @@ async def tts_speech(payload: SpeechRequest, request: Request):
     )
     return StreamingResponse(
         _stream_inference_results(handle, request),
-        media_type=f"audio/{payload.response_format}",
+        media_type=f"audio/{response_format}",
         headers={
-            "Content-Disposition": f"attachment; filename=speech.{payload.response_format}"
+            "Content-Disposition": f"attachment; filename=speech.{response_format}"
         },
     )
 
@@ -1154,9 +1215,20 @@ async def stt_transcriptions(
     * ``verbose_json`` -- ``application/json`` body with the full payload
       from the underlying model (``text``, ``segments``, ``language``,
       ...), passed through unchanged.
+    * ``srt`` / ``vtt`` -- subtitle cues rendered from the timed segments,
+      matching the CLI writers. Requires a model that returns timestamps.
 
     See https://platform.openai.com/docs/api-reference/audio/createTranscription
     """
+    if response_format not in _TRANSCRIPTION_RESPONSE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported response_format: {response_format!r}. "
+                f"Supported formats: {sorted(_TRANSCRIPTION_RESPONSE_FORMATS)}"
+            ),
+        )
+
     payload = TranscriptionRequest(
         model=model,
         language=language,
@@ -1194,7 +1266,7 @@ async def stt_transcriptions(
         stream=payload.stream,
     )
 
-    if response_format in ("text", "json", "verbose_json"):
+    if response_format in ("text", "json", "verbose_json", "srt", "vtt"):
         full: Optional[dict] = None
         accumulated = ""
         try:
@@ -1216,7 +1288,7 @@ async def stt_transcriptions(
                     except Exception:
                         continue
                     if isinstance(obj, dict) and (
-                        "segments" in obj or "language" in obj
+                        "segments" in obj or "language" in obj or "sentences" in obj
                     ):
                         full = obj
                     elif isinstance(obj, dict) and "text" in obj:
@@ -1231,8 +1303,26 @@ async def stt_transcriptions(
             return PlainTextResponse((full.get("text") or "").strip())
         if response_format == "json":
             return JSONResponse({"text": (full.get("text") or "").strip()})
-        # verbose_json: full payload (text, segments, language, ...) as-is
-        return JSONResponse(full)
+        if response_format == "verbose_json":
+            # verbose_json: full payload (text, segments, language, ...) as-is
+            return JSONResponse(full)
+
+        cues = _subtitle_cues(full)
+        if not cues and (full.get("text") or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"response_format={response_format!r} requires timestamps, "
+                    "but the model returned an untimed transcript. "
+                    "Use text, json, or verbose_json."
+                ),
+            )
+        return PlainTextResponse(
+            _render_subtitles(cues, response_format),
+            media_type=(
+                "application/x-subrip" if response_format == "srt" else "text/vtt"
+            ),
+        )
 
     return StreamingResponse(
         _stream_inference_results(handle, request, ndjson_errors=True),
