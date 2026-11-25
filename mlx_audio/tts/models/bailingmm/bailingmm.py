@@ -1438,7 +1438,7 @@ class Decoder(nn.Module):
         right_v = mx.take(x, mx.clip(right, 0, in_t - 1), axis=-1)
         return (
             left_v * (1.0 - w_right)[None, None, :] + right_v * w_right[None, None, :]
-        )
+        ).astype(x_bc.dtype)
 
     def _streaming_linear_upsample(self, x: mx.array, state, is_last: bool = False):
         if state is None:
