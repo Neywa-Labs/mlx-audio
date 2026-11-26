@@ -498,16 +498,17 @@ class KokoroPipeline:
                         if current_chunk:
                             chunks.append(current_chunk.strip())
                         current_chunk = sentence
+                        # A sentence with no boundary to split on can still be too
+                        # long: cut it at a space, or by characters if it has none.
+                        while len(current_chunk) > chunk_size:
+                            cut = current_chunk.rfind(" ", 1, chunk_size + 1)
+                            if cut == -1:
+                                cut = chunk_size
+                            chunks.append(current_chunk[:cut].strip())
+                            current_chunk = current_chunk[cut:]
 
                 if current_chunk:
                     chunks.append(current_chunk.strip())
-
-                # If no chunks were created (no sentence boundaries), fall back to character-based chunking
-                if not chunks:
-                    chunks = [
-                        graphemes[i : i + chunk_size]
-                        for i in range(0, len(graphemes), chunk_size)
-                    ]
 
                 # Process each chunk
                 for chunk in chunks:
