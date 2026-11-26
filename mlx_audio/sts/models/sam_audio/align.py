@@ -16,7 +16,7 @@ class AlignModalities(nn.Module):
 
     def __init__(
         self,
-        in_channels: int,
+        in_channels: Optional[int],
         out_channels: int,
         normalize: bool = True,
         with_gate: bool = True,
@@ -25,8 +25,11 @@ class AlignModalities(nn.Module):
         self.out_channels = out_channels
         self.normalize = normalize
 
-        # 1x1 convolution for projection
-        self.conv_weight = mx.zeros((out_channels, 1, in_channels))
+        # 1x1 convolution for projection; conv_weight is omitted when only
+        # zero-target alignment is used (e.g. text-only SAM-Audio without a
+        # vision encoder).
+        if in_channels is not None:
+            self.conv_weight = mx.zeros((out_channels, 1, in_channels))
         self.conv_bias = mx.zeros((out_channels,))
 
         if normalize:
@@ -48,6 +51,12 @@ class AlignModalities(nn.Module):
         if tgt is None:
             return anchor
 
+        if "conv_weight" not in self:
+            raise ValueError(
+                "AlignModalities was initialized without in_channels / conv_weight; "
+                "use align_zeros() for zero-target alignment."
+            )
+
         # Apply 1x1 convolution: (B, in_channels, T) -> (B, out_channels, T)
         # Transpose tgt to (B, T, in_channels) for conv1d
         tgt_t = mx.transpose(tgt, (0, 2, 1))
@@ -62,6 +71,30 @@ class AlignModalities(nn.Module):
             return post_conv
         else:
             return anchor + mx.tanh(self.gate) * post_conv
+
+    def align_zeros(self, anchor: mx.array) -> mx.array:
+        """
+        Align an all-zero target tensor without materializing conv1d(zeros).
+
+        Upstream SAM-Audio runs ``align_masked_video`` even when no video is
+        provided by passing an all-zero feature tensor, for which the 1x1
+        convolution reduces to ``conv_bias`` at every frame.
+
+        Args:
+            anchor: Input anchor tensor (B, T, out_channels)
+
+        Returns:
+            Aligned features (B, T, out_channels)
+        """
+        post_conv = self.conv_bias
+        if self.normalize:
+            post_conv = self.layer_norm(post_conv)
+
+        if self.gate is None:
+            return mx.broadcast_to(post_conv.astype(anchor.dtype), anchor.shape)
+
+        bias = (mx.tanh(self.gate) * post_conv).astype(anchor.dtype)
+        return anchor + bias
 
 
 class EmbedAnchors(nn.Module):

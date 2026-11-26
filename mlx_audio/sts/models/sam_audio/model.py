@@ -16,7 +16,7 @@ from tqdm import tqdm
 from mlx_audio.codec.models.dacvae import DACVAE
 from mlx_audio.utils import get_model_path
 
-from .align import EmbedAnchors
+from .align import AlignModalities, EmbedAnchors
 from .config import SAMAudioConfig
 from .processor import Batch, SAMAudioProcessor
 from .text_encoder import T5TextEncoder
@@ -140,6 +140,13 @@ class SAMAudio(nn.Module):
         # Input projection
         self.proj = nn.Linear(config.in_channels, config.transformer.dim)
 
+        # Video modality alignment (applied with zero video features in text-only
+        # mode, matching upstream where align_masked_video still runs without video)
+        self.align_masked_video = AlignModalities(
+            in_channels=None,
+            out_channels=config.transformer.dim,
+        )
+
         # Anchor embeddings for temporal prompts
         self.embed_anchors = EmbedAnchors(
             config.num_anchors,
@@ -217,6 +224,11 @@ class SAMAudio(nn.Module):
         """
         import re
 
+        align_weights_to_remove = {
+            "align_masked_video.conv.weight",
+            "align_masked_video.conv_weight",
+        }
+
         # Keys to remove
         keys_to_remove = {
             k
@@ -228,9 +240,9 @@ class SAMAudio(nn.Module):
                     "visual_ranker.",
                     "text_ranker.",
                     "vision_encoder.",
-                    "align_masked_video.",
                 )
             )
+            or k in align_weights_to_remove
             or "wm_rates" in k
         }
 
@@ -350,8 +362,11 @@ class SAMAudio(nn.Module):
         # Project to transformer dimension
         projected = self.proj(x)
 
+        # Apply zero-video modality alignment before anchors (matches upstream)
+        aligned = self.align_masked_video.align_zeros(projected)
+
         # Apply anchor embeddings if provided
-        aligned = self.embed_anchors(projected, anchor_ids, anchor_alignment)
+        aligned = self.embed_anchors(aligned, anchor_ids, anchor_alignment)
 
         return aligned
 
@@ -1370,6 +1385,10 @@ def _convert_weight_name(name: str) -> str:
         result = result.replace(
             "audio_codec.quantizer.out_proj.", "audio_codec.quantizer_out_proj."
         )
+
+    # === ALIGN MASKED VIDEO MAPPING ===
+    if result == "align_masked_video.conv.bias":
+        return "align_masked_video.conv_bias"
 
     return result
 
