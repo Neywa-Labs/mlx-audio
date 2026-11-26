@@ -319,7 +319,7 @@ class Model(nn.Module):
             segment_time = now - start_time
             start_time = now
 
-            samples = audio.shape[0] if audio is not None else 0
+            samples = audio.shape[-1] if audio is not None else 0
             assert samples > 0, "No audio generated"
 
             # Calculate token count
@@ -328,7 +328,7 @@ class Model(nn.Module):
             # Calculate audio duration in seconds
             sample_rate = self.config.sample_rate
 
-            audio_duration_seconds = samples / sample_rate * audio.shape[1]
+            audio_duration_seconds = samples / sample_rate
 
             # Calculate real-time factor (RTF)
             rtf = (
