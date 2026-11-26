@@ -227,7 +227,7 @@ _RE_MODEL_VER = re.compile(r"\b([a-zA-Z][a-zA-Z0-9]*)-(\d[\d.]*)(?=[^\d.]|$)")
 
 # Measurement units glued to numbers: 100km, 50kg, 25°C, 5GB
 _RE_UNIT = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(km|kg|mg|ml|gb|mb|kb|tb|hz|khz|mhz|ghz|mph|kph|°[cCfF]|[cCfF]°|ms|ns|µs)\b",
+    r"((?:(?<![\w.])-)?\d+(?:\.\d+)?)\s*(km|kg|mg|ml|gb|mb|kb|tb|hz|khz|mhz|ghz|mph|kph|°[cCfF]|[cCfF]°|ms|ns|µs)\b",
     re.IGNORECASE,
 )
 

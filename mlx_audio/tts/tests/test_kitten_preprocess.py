@@ -5,6 +5,7 @@ from mlx_audio.tts.models.kitten_tts.preprocess import (
     expand_fractions,
     expand_ordinals,
     expand_time,
+    expand_units,
 )
 
 
@@ -68,3 +69,25 @@ def test_fraction_denominator_tens_use_ieth():
     # The denominator is verbalized with the same ordinal rule.
     assert expand_fractions("1/20 of the pie") == "one twentieth of the pie"
     assert expand_fractions("3/50 chance") == "three fiftieths chance"
+
+
+@pytest.mark.parametrize(
+    ("input_text", "expected"),
+    [
+        ("-5°C", "negative five degrees Celsius"),
+        ("It is -40°F today", "It is negative forty degrees Fahrenheit today"),
+        ("a -2.5kg change", "a negative two point five kilograms change"),
+        # A hyphen after a digit or a word is a range or a compound, not a sign.
+        ("5-10kg", "5-ten kilograms"),
+        ("sub-5ms", "sub-five milliseconds"),
+        ("25°C", "twenty-five degrees Celsius"),
+    ],
+)
+def test_expand_units_reads_a_leading_minus_sign(input_text, expected):
+    assert expand_units(input_text) == expected
+
+
+def test_negative_temperature_keeps_its_sign_in_pipeline():
+    assert TextPreprocessor()("It is -5°C outside.") == (
+        "it is negative five degrees celsius outside"
+    )
