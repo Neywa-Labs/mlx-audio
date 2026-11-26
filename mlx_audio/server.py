@@ -12,6 +12,7 @@ import inspect
 import io
 import json
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -167,6 +168,24 @@ app.router.lifespan_context = app_lifespan
 _MAX_REQUEST_SEED = 2**32 - 1
 
 
+def _requested_timestamp_granularities(
+    values: List[str],
+) -> List[str]:
+    """Granularity names requested via ``timestamp_granularities`` fields.
+
+    Each raw value may hold ``word``, ``word,segment`` or a JSON-ish
+    ``["word"]``; bracketed ``timestamp_granularities[]`` items arrive
+    pre-split. Returns the valid names (``word``/``segment``) in request
+    order, deduplicated.
+    """
+    requested: List[str] = []
+    for value in values:
+        for name in re.findall(r"[a-z]+", value.lower()):
+            if name in ("word", "segment") and name not in requested:
+                requested.append(name)
+    return requested
+
+
 # Request schemas for OpenAI-compatible endpoints
 class SpeechRequest(BaseModel):
     model: str
@@ -206,7 +225,7 @@ class TranscriptionRequest(BaseModel):
     text: str | None = None
     prompt: str | None = None
     word_timestamps: bool = False
-    timestamp_granularities: Optional[str] = None
+    timestamp_granularities: Optional[List[str]] = None
 
 
 class SeparationResponse(BaseModel):
@@ -1138,7 +1157,12 @@ async def stt_transcriptions(
     prompt: Optional[str] = Form(None),
     response_format: str = Form("ndjson"),
     word_timestamps: bool = Form(False),
-    timestamp_granularities: Optional[str] = Form(None),
+    timestamp_granularities: Optional[List[str]] = Form(None),
+    # The official OpenAI client serializes this parameter as repeated
+    # `timestamp_granularities[]` form fields.
+    timestamp_granularities_items: Optional[List[str]] = Form(
+        None, alias="timestamp_granularities[]"
+    ),
 ):
     """Transcribe audio using an STT model.
 
@@ -1157,6 +1181,9 @@ async def stt_transcriptions(
 
     See https://platform.openai.com/docs/api-reference/audio/createTranscription
     """
+    granularities = _requested_timestamp_granularities(
+        (timestamp_granularities or []) + (timestamp_granularities_items or [])
+    )
     payload = TranscriptionRequest(
         model=model,
         language=language,
@@ -1171,8 +1198,10 @@ async def stt_transcriptions(
         prefill_step_size=prefill_step_size,
         text=text,
         prompt=prompt,
-        word_timestamps=word_timestamps,
-        timestamp_granularities=timestamp_granularities,
+        # OpenAI compatibility: a word granularity request implies word-level
+        # timestamps, which the models expose through ``word_timestamps``.
+        word_timestamps=word_timestamps or "word" in granularities,
+        timestamp_granularities=granularities or None,
     )
     data = await file.read()
     tmp = io.BytesIO(data)
