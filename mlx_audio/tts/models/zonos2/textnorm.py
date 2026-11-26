@@ -345,7 +345,17 @@ def _replace_money(match: re.Match[str]) -> str:
     major_singular, major_plural, minor_singular, minor_plural = _CURRENCIES[symbol]
     if quantity:
         quantity_word = _QUANTITIES[quantity.lower()]
-        major = major_singular if _numeric_is_one(amount) else major_plural
+        scale = {
+            "thousand": 1_000,
+            "million": 1_000_000,
+            "billion": 1_000_000_000,
+            "trillion": 1_000_000_000_000,
+        }[quantity_word]
+        try:
+            total = float(amount) * scale
+        except ValueError:
+            total = scale
+        major = major_singular if total == 1.0 else major_plural
         return f"{_number_to_words(amount)} {quantity_word} {major}"
 
     if "." in amount:

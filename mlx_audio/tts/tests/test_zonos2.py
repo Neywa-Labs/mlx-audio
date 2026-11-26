@@ -234,6 +234,26 @@ class TestZonos2TextNorm(unittest.TestCase):
         # Abbreviated suffixes glued to the amount still work.
         self.assertEqual(normalizer.normalize("$5M", "en"), "five million dollars")
 
+    def test_scaled_one_amount_uses_plural_currency_unit(self):
+        normalizer = TTSTextNormalizer()
+        # The unit must agree with the *scaled total*, not the bare
+        # multiplier: "$1 million" is one million dollars (plural), even
+        # though the written multiplier is "1".
+        self.assertEqual(
+            normalizer.normalize("$1 million", "en"), "one million dollars"
+        )
+        self.assertEqual(normalizer.normalize("$1 k", "en"), "one thousand dollars")
+        self.assertEqual(normalizer.normalize("$1 bn", "en"), "one billion dollars")
+        self.assertEqual(
+            normalizer.normalize("$1 trillion", "en"), "one trillion dollars"
+        )
+        # Neighbours that must keep holding: a bare one dollar stays
+        # singular, and a non-one multiplier stays plural.
+        self.assertEqual(normalizer.normalize("$1", "en"), "one dollar")
+        self.assertEqual(
+            normalizer.normalize("$5 million", "en"), "five million dollars"
+        )
+
     def test_numeric_dates_ordinals_units_and_phone_numbers(self):
         normalizer = TTSTextNormalizer()
         self.assertEqual(
