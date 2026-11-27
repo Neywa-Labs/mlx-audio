@@ -46,6 +46,41 @@ def test_time_does_not_glue_onto_following_decimal_in_pipeline():
 @pytest.mark.parametrize(
     ("input_text", "expected"),
     [
+        # Every integer group is preserved through and beyond the named scales.
+        ("1000000000000000", "one quadrillion"),
+        (
+            "1234000000000000",
+            "one quadrillion two hundred thirty four trillion",
+        ),
+        ("1000000000000000000", "one quintillion"),
+        ("1000000000000000007", "one quintillion seven"),
+        ("1000000000000000.5", "one quadrillion point five"),
+        (
+            "999999999999999999999",
+            "nine hundred ninety nine quintillion nine hundred ninety nine quadrillion "
+            "nine hundred ninety nine trillion nine hundred ninety nine billion "
+            "nine hundred ninety nine million nine hundred ninety nine thousand "
+            "nine hundred ninety nine",
+        ),
+        (
+            "1000000000000000000005",
+            "one zero zero zero zero zero zero zero zero zero zero zero zero zero zero "
+            "zero zero zero zero zero zero five",
+        ),
+        (
+            "-1000000000000000000000",
+            "negative one zero zero zero zero zero zero zero zero zero zero zero zero "
+            "zero zero zero zero zero zero zero zero zero",
+        ),
+    ],
+)
+def test_pipeline_preserves_all_integer_groups(input_text, expected):
+    assert TextPreprocessor()(input_text) == expected
+
+
+@pytest.mark.parametrize(
+    ("input_text", "expected"),
+    [
         # Tens-multiple ordinals end in "-ieth", not "-yth": the general rule
         # used to append "th" to any word, turning "twenty" into "twentyth".
         ("the 20th century", "the twentieth century"),
