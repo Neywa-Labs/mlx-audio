@@ -45,7 +45,15 @@ _TENS = [
     "eighty",
     "ninety",
 ]
-_SCALE = ["", "thousand", "million", "billion", "trillion"]
+_SCALE = [
+    "",
+    "thousand",
+    "million",
+    "billion",
+    "trillion",
+    "quadrillion",
+    "quintillion",
+]
 
 _ORDINAL_EXCEPTIONS = {
     "one": "first",
@@ -124,6 +132,8 @@ def number_to_words(n: int) -> str:
         return "zero"
     if n < 0:
         return f"negative {number_to_words(-n)}"
+    if n >= 10**21:
+        return " ".join("zero" if d == "0" else _ONES[int(d)] for d in str(n))
 
     # X00–X999 read as "X hundred" (e.g. 1200 → "twelve hundred")
     # Exclude exact multiples of 1000 (1000 → "one thousand", not "ten hundred")
@@ -743,7 +753,8 @@ def replace_numbers(text: str, replace_floats: bool = True) -> str:
                 # Pass raw string so trailing zeros are preserved ("1.50" → "one point five zero")
                 return float_to_words(raw)
             else:
-                return number_to_words(int(float(raw)))
+                value = int(float(raw)) if "." in raw else int(raw)
+                return number_to_words(value)
         except (ValueError, OverflowError):
             return m.group()
 
